@@ -2318,30 +2318,49 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     }
 
     private void handleGetUserListFailure(String errorCode, String errorMassage, Condition condition, String domain,
-            String profileName, int limit, int offset, String sortBy, String sortOrder) throws UserStoreException {
+          String profileName, int limit, Integer offset, String cursor, UserCoreConstants.PaginationDirection direction,
+                                          String sortBy, String sortOrder) throws UserStoreException {
 
         for (UserManagementErrorEventListener listener : UMListenerServiceComponent
                 .getUserManagementErrorEventListeners()) {
-            if (listener.isEnable() && listener instanceof AbstractUserManagementErrorListener
-                    && !listener
-                    .onGetUserListFailure(errorCode, errorMassage, condition, domain, profileName, limit, offset,
-                            sortBy, sortOrder, this)) {
-                return;
+            if (cursor == null) {
+                if (listener.isEnable() && listener instanceof AbstractUserManagementErrorListener
+                        && !listener
+                        .onGetUserListFailure(errorCode, errorMassage, condition, domain, profileName, limit, offset,
+                                sortBy, sortOrder, this)) {
+                    return;
+                }
+            } else {
+                if (listener.isEnable() && listener instanceof AbstractUserManagementErrorListener && !listener
+                        .onGetUserListFailure(errorCode, errorMassage, condition, domain, profileName, limit, cursor,
+                                direction, sortBy, sortOrder, this)) {
+                    return;
+                }
             }
         }
     }
 
     private void handleGetUserListFailureWithID(String errorCode, String errorMassage, Condition condition,
-            String domain, String profileName, int limit, int offset, String sortBy, String sortOrder)
+            String domain, String profileName, int limit, Integer offset, String cursor,
+            UserCoreConstants.PaginationDirection direction, String sortBy, String sortOrder)
             throws UserStoreException {
 
         for (UserManagementErrorEventListener listener : UMListenerServiceComponent
                 .getUserManagementErrorEventListeners()) {
-            if (listener.isEnable() && listener instanceof AbstractUserManagementErrorListener
-                    && !((AbstractUserManagementErrorListener) listener)
-                    .onGetUserListFailureWithID(errorCode, errorMassage, condition, domain, profileName, limit, offset,
-                            sortBy, sortOrder, this)) {
-                return;
+            if (cursor == null) {
+                if (listener.isEnable() && listener instanceof AbstractUserManagementErrorListener
+                        && !((AbstractUserManagementErrorListener) listener)
+                        .onGetUserListFailureWithID(errorCode, errorMassage, condition, domain, profileName, limit, offset,
+                                sortBy, sortOrder, this)) {
+                    return;
+                }
+            } else {
+                if (listener.isEnable() && listener instanceof AbstractUserManagementErrorListener
+                        && !((AbstractUserManagementErrorListener) listener)
+                        .onGetUserListFailureWithID(errorCode, errorMassage, condition, domain, profileName, limit,
+                                cursor, direction, sortBy, sortOrder, this)) {
+                    return;
+                }
             }
         }
     }
@@ -2600,13 +2619,15 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         } catch (UserStoreException ex) {
             handleGetUserListFailure(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_GET_CONDITIONAL_USER_LIST.getCode(),
                     String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_GET_CONDITIONAL_USER_LIST.getMessage(),
-                            ex.getMessage()), condition, domain, profileName, limit, offset, sortBy, sortOrder);
+                            ex.getMessage()), condition, domain, profileName, limit, offset, null, null, sortBy,
+                    sortOrder);
             throw ex;
         }
     }
 
     private void handlePostGetUserListWithID(Condition condition, String domain, String profileName, int limit,
-                                             int offset, String sortBy, String sortOrder, List<User> users, boolean isAuditLogOnly)
+                 Integer offset, String cursor, UserCoreConstants.PaginationDirection direction, String sortBy,
+                 String sortOrder, List<User> users, boolean isAuditLogOnly)
             throws UserStoreException {
 
         try {
@@ -2617,9 +2638,16 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                         continue;
                     }
                     AbstractUserOperationEventListener newListener = (AbstractUserOperationEventListener) listener;
-                    if (!newListener.doPostGetUserListWithID(condition, domain, profileName, limit, offset, sortBy,
-                            sortOrder, users, this)) {
-                        break;
+                    if (cursor == null) {
+                        if (!newListener.doPostGetUserListWithID(condition, domain, profileName, limit, offset, sortBy,
+                                sortOrder, users, this)) {
+                            break;
+                        }
+                    } else {
+                        if (!newListener.doPostGetUserListWithID(condition, domain, profileName, limit, cursor,
+                                direction, sortBy, sortOrder, users, this)) {
+                            break;
+                        }
                     }
                 }
             }
@@ -2627,7 +2655,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             handleGetUserListFailureWithID(
                     ErrorMessages.ERROR_CODE_ERROR_DURING_POST_GET_CONDITIONAL_USER_LIST.getCode(),
                     String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_GET_CONDITIONAL_USER_LIST.getMessage(),
-                            ex.getMessage()), condition, domain, profileName, limit, offset, sortBy, sortOrder);
+                            ex.getMessage()), condition, domain, profileName, limit, offset, cursor, direction, sortBy,
+                    sortOrder);
             throw ex;
         }
     }
@@ -2648,7 +2677,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                                 String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST
                                                 .getMessage(),
                                         UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), condition, domain,
-                                profileName, limit, offset, sortBy, sortOrder);
+                                profileName, limit, offset, null, null, sortBy, sortOrder);
                         break;
                     }
                 }
@@ -2657,36 +2686,54 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             handleGetUserListFailure(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getCode(),
                     String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getMessage(),
                             ex.getMessage()), condition, domain,
-                    profileName, limit, offset, sortBy, sortOrder);
+                    profileName, limit, offset, null, null, sortBy, sortOrder);
             throw ex;
         }
     }
 
     private void handlePreGetUserListWithID(Condition condition, String domain, String profileName, int limit,
-            int offset,
-            String sortBy, String sortOrder) throws UserStoreException {
+            Integer offset, String cursor, UserCoreConstants.PaginationDirection direction, String sortBy,
+                                            String sortOrder)
+            throws UserStoreException {
 
         try {
             for (UserOperationEventListener listener : UMListenerServiceComponent
                     .getUserOperationEventListeners()) {
                 if (listener instanceof AbstractUserOperationEventListener) {
                     AbstractUserOperationEventListener newListener = (AbstractUserOperationEventListener) listener;
-                    if (!newListener.doPreGetUserListWithID(condition, domain, profileName, limit, offset, sortBy,
-                            sortOrder, this)) {
+                    if (cursor == null) {
+                        if (!newListener.doPreGetUserListWithID(condition, domain, profileName, limit, offset, sortBy,
+                                sortOrder, this)) {
 
-                        handleGetUserListFailure(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getCode(),
-                                String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getMessage(),
-                                        UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), condition, domain,
-                                profileName, limit, offset, sortBy, sortOrder);
-                        break;
+                            handleGetUserListFailure(ErrorMessages.
+                                            ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getCode(),
+                                    String.format(ErrorMessages.
+                                                    ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getMessage(),
+                                            UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), condition,
+                                    domain, profileName, limit, offset, null, null, sortBy, sortOrder);
+                            break;
+                        }
+                    } else {
+                        if (!newListener.doPreGetUserListWithID(condition, domain, profileName, limit, cursor,
+                                direction, sortBy, sortOrder, this)) {
+
+                            handleGetUserListFailure(ErrorMessages.
+                                ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getCode(),
+                                String.format(ErrorMessages.
+                                ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getMessage(),
+                                UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), condition,
+                                domain, profileName, limit, null, cursor, direction, sortBy, sortOrder);
+                            break;
+                        }
                     }
+
                 }
             }
         } catch (UserStoreException ex) {
             handleGetUserListFailure(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getCode(),
                     String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST.getMessage(),
                             ex.getMessage()), condition, domain,
-                    profileName, limit, offset, sortBy, sortOrder);
+                    profileName, limit, offset, null, null, sortBy, sortOrder);
             throw ex;
         }
     }
@@ -10233,7 +10280,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             if (secManager instanceof AbstractUserStoreManager) {
                 if (((AbstractUserStoreManager) secManager).isUniqueUserIdEnabled()) {
                     UniqueIDPaginatedSearchResult users = ((AbstractUserStoreManager) secManager).doGetUserListWithID(condition,
-                            profileName, limit, offset, sortBy, sortOrder);
+                            profileName, limit, offset, null, null, sortBy, sortOrder);
                     addUsersToUserIdCache(users.getUsers());
                     addUsersToUserNameCache(users.getUsers());
                     filteredUsers = users.getUsers().stream().map(User::getUsername).toArray(String[]::new);
@@ -10260,14 +10307,15 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     }
 
     protected UniqueIDPaginatedSearchResult doGetUserListWithID(Condition condition, String profileName, int limit,
-            int offset, String sortBy, String sortOrder) throws UserStoreException {
+              Integer offset, String cursor, UserCoreConstants.PaginationDirection direction, String sortBy,
+                                                                String sortOrder)
+            throws UserStoreException {
 
         if (log.isDebugEnabled()) {
             log.debug("doGetUserListWithID operation is not implemented in: " + this.getClass());
         }
         throw new NotImplementedException("doGetUserListWithID operation is not implemented in: " + this.getClass());
     }
-
 
     @Override
     public String[] listUsers(String filter, int limit, int offset) throws UserStoreException {
@@ -10448,7 +10496,10 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 ExpressionOperation.SW.toString().equals(condition.getOperation()) ||
                 ExpressionOperation.EW.toString().equals(condition.getOperation()) ||
                 ExpressionOperation.GE.toString().equals(condition.getOperation()) ||
-                ExpressionOperation.LE.toString().equals(condition.getOperation()));
+                ExpressionOperation.LE.toString().equals(condition.getOperation()) ||
+                ExpressionOperation.GT.toString().equals(condition.getOperation()) ||
+                ExpressionOperation.LT.toString().equals(condition.getOperation()) ||
+                ExpressionOperation.NE.toString().equals(condition.getOperation()));
     }
 
     private boolean isAnInternalRole(String roleName) {
@@ -15508,6 +15559,10 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     public List<User> getUserListWithID(Condition condition, String domain, String profileName, int limit, int offset,
                                         String sortBy, String sortOrder) throws UserStoreException {
 
+        // This method will flow down to use offset pagination, so the cursor and direction will be null.
+        String cursor = null;
+        UserCoreConstants.PaginationDirection direction = null;
+
         validateCondition(condition);
         if (StringUtils.isNotEmpty(sortBy) && StringUtils.isNotEmpty(sortOrder)) {
             throw new UserStoreException("Sorting is not supported.");
@@ -15521,7 +15576,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             profileName = UserCoreConstants.DEFAULT_PROFILE;
         }
 
-        handlePreGetUserListWithID(condition, domain, profileName, limit, offset, sortBy, sortOrder);
+        handlePreGetUserListWithID(condition, domain, profileName, limit, offset, cursor, direction, sortBy, sortOrder);
         if (log.isDebugEnabled()) {
             log.debug("Pre listener get conditional  user list for domain: " + domain);
         }
@@ -15550,8 +15605,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
             // Call the listeners to get the filtered users from relevant identity store.
             if (secondaryUserStoreManager != null) {
-                handlePreGetUserListWithIdentityClaims(duplicateCondition, domain, profileName, limit, offset, sortBy,
-                        sortOrder, secondaryUserStoreManager, identityClaimFilteredUserNames,
+                handlePreGetUserListWithIdentityClaims(duplicateCondition, domain, profileName, limit, offset, cursor,
+                        direction, sortBy, sortOrder, secondaryUserStoreManager, identityClaimFilteredUserNames,
                         hasNonIdentityClaimFilterConditions);
             }
 
@@ -15600,8 +15655,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
             Set<User> prevIterationFilteredUsers = new HashSet<>();
             while (aggregateUserList.size() < paginationLimit) {
-                tempFilteredUsers = getFilteredUsers(duplicateCondition, profileName, limit, offsetCounter, sortBy,
-                        sortOrder, secondaryUserStoreManager);
+                tempFilteredUsers = getFilteredUsers(duplicateCondition, profileName, limit, offsetCounter, cursor,
+                        direction, sortBy, sortOrder, secondaryUserStoreManager);
 
                 if (tempFilteredUsers.isEmpty()) {
                     // Means no users has been filtered in this particular iteration and hence can exit the flow.
@@ -15646,12 +15701,176 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         } else {
             /* When the filters has only the non-identity claims or if Identity claims are persisted in User store
             based Identity Data store.*/
-            filteredUsers = getFilteredUsers(duplicateCondition, profileName, limit, offset, sortBy, sortOrder,
-                    secondaryUserStoreManager);
+            filteredUsers = getFilteredUsers(duplicateCondition, profileName, limit, offset, cursor, direction, sortBy,
+                    sortOrder, secondaryUserStoreManager);
         }
 
-        handlePostGetUserListWithID(condition, domain, profileName, limit, offset, sortBy, sortOrder, filteredUsers,
-                false);
+        handlePostGetUserListWithID(condition, domain, profileName, limit, offset, cursor, direction, sortBy, sortOrder,
+                filteredUsers, false);
+
+        if (log.isDebugEnabled()) {
+            log.debug("post listener get conditional  user list for domain: " + domain);
+        }
+        return filteredUsers;
+    }
+
+
+    @Override
+    public List<User> getUserListWithID(Condition condition, String domain, String profileName, int limit,
+                                        String cursor, String directionStr, String sortBy, String sortOrder)
+            throws UserStoreException, NullPointerException {
+
+        // This method will flow down to use cursor pagination, so the offset will be null.
+        Integer offset = null;
+
+        UserCoreConstants.PaginationDirection direction = UserCoreConstants.PaginationDirection.valueOf(directionStr);
+
+        validateCondition(condition);
+        if (StringUtils.isNotEmpty(sortBy) && StringUtils.isNotEmpty(sortOrder)) {
+            throw new UserStoreException("Sorting is not supported.");
+        }
+
+        if (StringUtils.isEmpty(domain)) {
+            domain = UserCoreConstants.PRIMARY_DEFAULT_DOMAIN_NAME;
+        }
+
+        if (StringUtils.isEmpty(profileName)) {
+            profileName = UserCoreConstants.DEFAULT_PROFILE;
+        }
+
+        handlePreGetUserListWithID(condition, domain, profileName, limit, offset, cursor, direction, sortBy,
+                sortOrder);
+        if (log.isDebugEnabled()) {
+            log.debug("Pre listener get conditional  user list for domain: " + domain);
+        }
+
+        UserStoreManager secondaryUserStoreManager = getSecondaryUserStoreManager(domain);
+        List<User> identityClaimFilteredUsers = new ArrayList<>();
+        List<String> identityClaimFilteredUserNames = new ArrayList<>();
+        List<User> filteredUsers = new ArrayList<>();
+        boolean hasNonIdentityClaimFilterConditions = false;
+        boolean isIdentityClaimsInIdentityStore = false;
+        boolean isIdentityClaimFilterExistInPostCondition;
+        List<ExpressionCondition> expressionConditions = new ArrayList<>();
+
+        /* Duplicating condition object to ensure that nullifying the conditions in the flow does not affect the
+        validation in the next iteration of flow when the domain name is not in query params.*/
+        Condition duplicateCondition = getDuplicateCondition(condition);
+        getExpressionConditions(duplicateCondition, expressionConditions);
+
+        // Check whether the request has IdentityClaims in filters.
+        boolean identityClaimsExistsInInitialCondition = hasIdentityClaimInitially(expressionConditions);
+
+        if (identityClaimsExistsInInitialCondition) {
+            if (expressionConditions.size() != countIdentityClaims(expressionConditions)) {
+                hasNonIdentityClaimFilterConditions = true;
+            }
+
+            // Call the listeners to get the filtered users from relevant identity store.
+            if (secondaryUserStoreManager != null) {
+                handlePreGetUserListWithIdentityClaims(duplicateCondition, domain, profileName, limit, offset, cursor,
+                        direction, sortBy, sortOrder, secondaryUserStoreManager, identityClaimFilteredUserNames,
+                        hasNonIdentityClaimFilterConditions);
+            }
+
+            // Check whether the request has IdentityClaims in filters after trying to filter at Identity Data Store.
+            expressionConditions = new ArrayList<>();
+            getExpressionConditions(duplicateCondition, expressionConditions);
+            isIdentityClaimFilterExistInPostCondition = containsIdentityClaims(expressionConditions);
+
+            // Means the identity claims are identity store based. (Else it is user store based)
+            if (!isIdentityClaimFilterExistInPostCondition) {
+                isIdentityClaimsInIdentityStore = true;
+            } else {
+                updateCondition(duplicateCondition, domain);
+            }
+
+            /* If identity claims are in JDBCIdentityDataStore, and filtering in JDBCIdentityDataStore returned an empty
+         list, we can skip filtering in user store.*/
+            if (isIdentityClaimsInIdentityStore && identityClaimFilteredUserNames.isEmpty()) {
+                return filteredUsers;
+            }
+
+            for (String username : identityClaimFilteredUserNames) {
+                User user = getUser(getUserIDFromUserName(username), username);
+                user.setUserStoreDomain(UserCoreUtil.extractDomainFromName(username));
+                identityClaimFilteredUsers.add(user);
+            }
+
+            // After filtering based on identity claims, if there are no other filters can return the list.
+            if (expressionConditions.isEmpty()) {
+                return identityClaimFilteredUsers;
+            }
+        }
+
+        if (identityClaimsExistsInInitialCondition && isIdentityClaimsInIdentityStore) {
+            // The identity claims are not user store based.
+            List<User> tempFilteredUsers;
+            List<User> aggregateUserList = new ArrayList<>();
+            String cursorCounter = cursor;
+
+            Set<User> prevIterationFilteredUsers = new HashSet<>();
+            while (aggregateUserList.size() < limit) {
+                tempFilteredUsers = getFilteredUsers(duplicateCondition, profileName, limit, offset, cursorCounter,
+                        direction, sortBy, sortOrder, secondaryUserStoreManager);
+
+                if (tempFilteredUsers.isEmpty()) {
+                    // Means no users has been filtered in this particular iteration and hence can exit the flow.
+                    break;
+                }
+
+                // Prevent same set of users being returned and break the loop if so.
+                if (isExactSameFilteredUsers(tempFilteredUsers, prevIterationFilteredUsers)) {
+                    break;
+                }
+
+                prevIterationFilteredUsers.clear();
+                prevIterationFilteredUsers.addAll(tempFilteredUsers);
+
+                // For next iteration consider the offset from last fetched size of users.
+                if (!(tempFilteredUsers.size() < limit)) {
+                    if (UserCoreConstants.PaginationDirection.PREVIOUS == direction) {
+                        cursorCounter = tempFilteredUsers.get(0).getPreferredUsername();
+                    } else {
+                        cursorCounter = tempFilteredUsers.get(tempFilteredUsers.size() - 1).getPreferredUsername();
+                    }
+                    // Taking the interception of the user list.
+                    tempFilteredUsers.retainAll(identityClaimFilteredUsers);
+                    aggregateUserList.addAll(tempFilteredUsers);
+                } else {
+                    // Taking the interception of the user list.
+                    tempFilteredUsers.retainAll(identityClaimFilteredUsers);
+                    aggregateUserList.addAll(tempFilteredUsers);
+                    break;
+                }
+            }
+
+            // Removing duplicates.
+            aggregateUserList = aggregateUserList.stream().distinct().collect(Collectors.toList());
+
+            // Intersecting data maybe added in no particular order. Needs to be organized in ASC order of userName.
+            if (UserCoreConstants.PaginationDirection.PREVIOUS == direction) {
+                Collections.sort(aggregateUserList, (user1, user2) ->
+                        user1.getUsername().compareTo(user2.getUsername()));
+            }
+
+            if (aggregateUserList.isEmpty()) {
+                filteredUsers = aggregateUserList;
+            } else if (aggregateUserList.size() < limit) {
+                filteredUsers = aggregateUserList.subList(0, aggregateUserList.size());
+            } else {
+                filteredUsers = aggregateUserList.subList(0, limit);
+            }
+        } else {
+            /* When the filters has only the non-identity claims or if Identity claims are persisted in User store
+            based Identity Data store.*/
+            filteredUsers = getFilteredUsers(duplicateCondition, profileName, limit, offset, cursor, direction, sortBy,
+                    sortOrder, secondaryUserStoreManager);
+        }
+
+
+        handlePostGetUserListWithID(condition, domain, profileName, limit, offset, cursor, direction, sortBy,
+                sortOrder, filteredUsers, false);
 
         if (log.isDebugEnabled()) {
             log.debug("post listener get conditional  user list for domain: " + domain);
@@ -15673,15 +15892,18 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
     }
 
-    private List<User> getFilteredUsers(Condition condition, String profileName, int limit, int offset, String sortBy,
-                                        String sortOrder, UserStoreManager secManager) throws UserStoreException {
+    private List<User> getFilteredUsers(Condition condition, String profileName, int limit, Integer offset,
+                       String cursor, UserCoreConstants.PaginationDirection direction, String sortBy, String sortOrder,
+                       UserStoreManager secManager)
+            throws UserStoreException {
 
         List<User> filteredUsers = new ArrayList<>();
         if (secManager != null) {
             if (secManager instanceof AbstractUserStoreManager) {
                 if (isUniqueUserIdEnabled(secManager)) {
                     UniqueIDPaginatedSearchResult users = ((AbstractUserStoreManager) secManager)
-                            .doGetUserListWithID(condition, profileName, limit, offset, sortBy, sortOrder);
+                            .doGetUserListWithID(condition, profileName, limit, offset, cursor, direction, sortBy,
+                                    sortOrder);
                     addUsersToUserIdCache(users.getUsers());
                     addUsersToUserNameCache(users.getUsers());
                     filteredUsers = users.getUsers();
@@ -15736,8 +15958,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
      * @throws UserStoreException User store exception.
      */
     private void handlePreGetUserListWithIdentityClaims(Condition condition, String domain, String profileName,
-                                                        int limit, int offset, String sortBy, String sortOrder,
-                                                        UserStoreManager secManager,
+                          int limit, Integer offset, String cursor, UserCoreConstants.PaginationDirection direction,
+                          String sortBy, String sortOrder, UserStoreManager secManager,
                                                         List<String> identityClaimFilteredUserNames,
                                                         boolean hasNonIdentityClaimFilters) throws UserStoreException {
 
@@ -15749,16 +15971,31 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                             (AbstractUserOperationEventListener) listener;
 
                     if (!hasNonIdentityClaimFilters) {
-                        // In this case, can filter with Identity claim filters and paginate at DB level.
-                        if (!newListener.doPreGetPaginatedUserList(condition, identityClaimFilteredUserNames,
-                                domain, secManager, limit, offset)) {
-                            handleGetUserListFailure(
-                                    ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_PAGINATED_USER_LIST.getCode(),
-                                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_PAGINATED_USER_LIST
-                                                    .getMessage(),
-                                            UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE),
-                                    condition, domain, profileName, limit, offset, sortBy, sortOrder);
-                            break;
+                        if (cursor == null) {
+                            // In this case, can filter with Identity claim filters and paginate at DB level.
+                            if (!newListener.doPreGetPaginatedUserList(condition, identityClaimFilteredUserNames,
+                                    domain, secManager, limit, offset)) {
+                                handleGetUserListFailure(
+                                        ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_PAGINATED_USER_LIST.getCode(),
+                                        String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_PAGINATED_USER_LIST
+                                        .getMessage(), UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE),
+                                        condition, domain, profileName, limit, offset, null, null, sortBy, sortOrder);
+                                break;
+                            }
+                        } else {
+                            // In this case, can filter with Identity claim filters and paginate at DB level.
+                            if (!newListener.doPreGetPaginatedUserList(condition, identityClaimFilteredUserNames,
+                                    domain, secManager, limit, cursor, direction)) {
+                                //Introduced a new method because there may be more instances where this
+                                // method is called in other repos.
+                                handleGetUserListFailure(
+                                        ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_PAGINATED_USER_LIST.getCode(),
+                                        String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_PAGINATED_USER_LIST
+                                        .getMessage(), UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE),
+                                        condition, domain, profileName, limit, null, cursor, direction, sortBy,
+                                        sortOrder);
+                                break;
+                            }
                         }
                     } else {
                         // In this case, can filter with Identity claim filters and fetch whole filtered list.
@@ -15769,7 +16006,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                                     String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_GET__CONDITIONAL_USER_LIST
                                                     .getMessage(),
                                             UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE),
-                                    condition, domain, profileName, limit, offset, sortBy, sortOrder);
+                                    condition, domain, profileName, limit, offset, null, null, sortBy, sortOrder);
                             break;
                         }
                     }
@@ -15858,8 +16095,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
             for (ExpressionCondition expressionCondition : expressionConditions) {
                 List<org.wso2.carbon.user.api.ClaimMapping> mappedClaim =
-                        Arrays.stream(claimMapping).filter(mapping -> mapping.getMappedAttribute() ==
-                                expressionCondition.getAttributeName()).collect(Collectors.toList());
+                        Arrays.stream(claimMapping).filter(mapping -> mapping.getMappedAttribute()
+                                        .equals(expressionCondition.getAttributeName())).collect(Collectors.toList());
 
                 //Obtaining relevant URI for the mapped attribute.
                 if (mappedClaim.size() == 1) {
@@ -16611,7 +16848,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (isUniqueUserIdEnabled()) {
             UniqueIDPaginatedSearchResult users = this.doGetUserListWithID(condition,
                     UserCoreConstants.PRIMARY_DEFAULT_DOMAIN_NAME, resolveUserListLimit(limit), offset,
-                    sortBy, sortOrder);
+                    null, null, sortBy, sortOrder);
             addUsersToUserIdCache(users.getUsers());
             addUsersToUserNameCache(users.getUsers());
             filteredUsers = users.getUsers();

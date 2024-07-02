@@ -19,6 +19,7 @@
 package org.wso2.carbon.user.core.listener;
 
 import org.wso2.carbon.user.api.Permission;
+import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
 import org.wso2.carbon.user.core.common.AbstractUserStoreManager;
@@ -130,11 +131,14 @@ public interface UniqueIDUserOperationEventListener extends UserOperationEventLi
      * @return true if handling succeeds, otherwise false.
      * @throws UserStoreException User Store Exception.
      */
-    boolean doPreGetUserListWithID(String claimUri, String claimValue, final List<User> returnUsersList,
-            UserStoreManager userStoreManager) throws UserStoreException;
+    default boolean doPreGetUserListWithID(String claimUri, String claimValue, final List<User> returnUsersList,
+            UserStoreManager userStoreManager) throws UserStoreException {
+
+        return true;
+    }
 
     /**
-     * Pre listener for the get paginated  conditional user list method.
+     * Pre listener for the get offset paginated conditional user list method.
      *
      * @param condition        condition.
      * @param domain           user store domain.
@@ -149,6 +153,29 @@ public interface UniqueIDUserOperationEventListener extends UserOperationEventLi
      */
     boolean doPreGetUserListWithID(Condition condition, String domain, String profileName, int limit, int offset,
             String sortBy, String sortOrder, UserStoreManager userStoreManager) throws UserStoreException;
+
+    /**
+     * Pre listener for the get cursor paginated conditional user list method.
+     *
+     * @param condition        Condition.
+     * @param domain           User store domain.
+     * @param profileName      Profile name.
+     * @param limit            Number of search results.
+     * @param cursor           Cursor value used for cursor pagination.
+     * @param direction        Pagination direction.
+     * @param sortBy           Sort By attribute
+     * @param sortOrder        Sort order.
+     * @param userStoreManager userStoreManager.
+     * @return true if handling succeeds, otherwise false.
+     * @throws UserStoreException User Store Exception.
+     */
+    default boolean doPreGetUserListWithID(Condition condition, String domain, String profileName, int limit, String cursor,
+                                   UserCoreConstants.PaginationDirection direction, String sortBy, String sortOrder,
+                                   UserStoreManager userStoreManager)
+            throws UserStoreException {
+
+        return true;
+    }
 
     /**
      * Pre listener for the get paginated user list method.
@@ -194,7 +221,7 @@ public interface UniqueIDUserOperationEventListener extends UserOperationEventLi
             int offset, UserStoreManager userStoreManager) throws UserStoreException;
 
     /**
-     * Post listener for the get user conditional list method.
+     * Post listener for the get user with offset pagination conditional list method.
      *
      * @param condition        condition.
      * @param domain           user store domain.
@@ -209,6 +236,26 @@ public interface UniqueIDUserOperationEventListener extends UserOperationEventLi
      */
     boolean doPostGetUserListWithID(Condition condition, String domain, String profileName, int limit, int offset,
             String sortBy, String sortOrder, List<User> users, UserStoreManager userStoreManager)
+            throws UserStoreException;
+
+    /**
+     * Post listener for the get user with cursor pagination conditional list method.
+     *
+     * @param condition        Condition.
+     * @param domain           User store domain.
+     * @param profileName      Profile name.
+     * @param limit            Number of search results.
+     * @param cursor           The cursor value used for cursor pagination.
+     * @param direction        The direction of cursor pagination.
+     * @param sortBy           Sort by attribute.
+     * @param sortOrder        Sort order.
+     * @param userStoreManager User store manager.
+     * @param users            Filtered user list
+     * @throws UserStoreException UserStoreException
+     */
+    boolean doPostGetUserListWithID(Condition condition, String domain, String profileName, int limit, String cursor,
+                                    UserCoreConstants.PaginationDirection direction, String sortBy, String sortOrder,
+                                    List<User> users, UserStoreManager userStoreManager)
             throws UserStoreException;
 
     /**
