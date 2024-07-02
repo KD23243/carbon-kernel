@@ -20,6 +20,7 @@
 package org.wso2.carbon.user.core.common;
 
 import org.wso2.carbon.user.api.Permission;
+import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
 import org.wso2.carbon.user.core.listener.UniqueIDUserManagementErrorEventListener;
@@ -294,6 +295,15 @@ public class AbstractUserManagementErrorListener implements UniqueIDUserManageme
     public boolean onGetUserListFailureWithID(String errorCode, String errorMassage, Condition condition, String domain,
             String profileName, int limit, int offset, String sortBy, String sortOrder,
             UserStoreManager userStoreManager) throws UserStoreException {
+
+        return true;
+    }
+
+    @Override
+    public boolean onGetUserListFailureWithID(String errorCode, String errorMassage, Condition condition, String domain,
+                   String profileName, int limit, String cursor, UserCoreConstants.PaginationDirection direction,
+                   String sortBy, String sortOrder, UserStoreManager userStoreManager)
+            throws UserStoreException {
 
         return true;
     }
