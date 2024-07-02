@@ -20,6 +20,7 @@
 package org.wso2.carbon.user.core.listener;
 
 import org.wso2.carbon.user.api.Permission;
+import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
 import org.wso2.carbon.user.core.model.Condition;
@@ -632,7 +633,7 @@ public interface UserOperationEventListener {
     }
 
     /**
-     * Pre listener for the get paginated  conditional user list method.
+     * Pre listener for the get offset paginated conditional user list method.
      *
      * @param condition        condition.
      * @param domain           user store domain.
@@ -646,6 +647,27 @@ public interface UserOperationEventListener {
      */
     default boolean doPreGetUserList(Condition condition, String domain, String profileName, int limit, int offset, String sortBy, String
             sortOrder, UserStoreManager userStoreManager) throws UserStoreException {
+
+        return true;
+    }
+
+    /**
+     * Pre listener for the get cursor paginated conditional user list method.
+     *
+     * @param condition        Condition.
+     * @param domain           User store domain.
+     * @param profileName      Profile name.
+     * @param limit            Number of search results.
+     * @param cursor           Cursor used for pagination.
+     * @param direction        Direction of paginated search.
+     * @param sortBy           Sort By attribute
+     * @param sortOrder        Sort order.
+     * @param userStoreManager userStoreManager.
+     * @throws UserStoreException UserStoreException
+     */
+    default boolean doPreGetUserList(Condition condition, String domain, String profileName, int limit, String cursor,
+                                     UserCoreConstants.PaginationDirection direction, String sortBy, String sortOrder,
+                                     UserStoreManager userStoreManager) throws UserStoreException {
 
         return true;
     }
@@ -719,6 +741,28 @@ public interface UserOperationEventListener {
     default boolean doPostGetUserList(Condition condition, String domain, String profileName, int limit, int offset,
             String sortBy, String sortOrder, String[] users, UserStoreManager
             userStoreManager) throws UserStoreException {
+
+        return true;
+    }
+
+    /**
+     * Post listener for the get user cursor paginated conditional list method.
+     *
+     * @param condition        Condition.
+     * @param domain           User store domain.
+     * @param profileName      Profile name.
+     * @param limit            Number of search results.
+     * @param cursor           Cursor value used for cursor pagination.
+     * @param direction        Cursor pagination direction.
+     * @param sortBy           Sort by attribute.
+     * @param sortOrder        Sort order.
+     * @param userStoreManager User store manager.
+     * @param users            Filtered user list
+     * @throws UserStoreException UserStoreException
+     */
+    default boolean doPostGetUserList(Condition condition, String domain, String profileName, int limit, String cursor,
+                                      UserCoreConstants.PaginationDirection direction, String sortBy, String sortOrder,
+                                      String[] users, UserStoreManager userStoreManager) throws UserStoreException {
 
         return true;
     }
@@ -868,7 +912,7 @@ public interface UserOperationEventListener {
     }
 
     /**
-     * Pre listener for getting paginated user list for certain claim and value.
+     * Pre listener for getting paginated user list for certain claim and value - Offset pagination.
      *
      * @param condition        Conditions with filters.
      * @param domain           User store domain name.
@@ -879,6 +923,25 @@ public interface UserOperationEventListener {
      */
     default boolean doPreGetPaginatedUserList(Condition condition, List<String> userNames, String domain,
                                               UserStoreManager userStoreManager, int limit, int offset)
+            throws UserStoreException {
+
+        return true;
+    }
+
+    /**
+     * Pre listener for getting paginated user list for certain claim and value - Cursor Pagination.
+     *
+     * @param condition        Conditions with filters.
+     * @param domain           User store domain name.
+     * @param userStoreManager User store manager.
+     * @param limit            Pagination parameter for the size of the page.
+     * @param cursor           Cursor value to paginate based off.
+     * @param direction        Direction of pagination.
+     * @throws UserStoreException UserStoreException
+     */
+    default boolean doPreGetPaginatedUserList(Condition condition, List<String> userNames, String domain,
+                                              UserStoreManager userStoreManager, int limit, String cursor,
+                                              UserCoreConstants.PaginationDirection direction)
             throws UserStoreException {
 
         return true;

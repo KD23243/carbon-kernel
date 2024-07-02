@@ -19,6 +19,7 @@
 package org.wso2.carbon.user.core.listener;
 
 import org.wso2.carbon.user.api.Permission;
+import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
 import org.wso2.carbon.user.core.common.AbstractUserStoreManager;
@@ -348,6 +349,30 @@ public interface UniqueIDUserManagementErrorEventListener extends UserManagement
     boolean onGetUserListFailureWithID(String errorCode, String errorMassage, Condition condition, String domain,
             String profileName, int limit, int offset, String sortBy, String sortOrder,
             UserStoreManager userStoreManager) throws UserStoreException;
+
+    /**
+     * Defines any additional actions that need to be done if there is a failure on retrieving cursor paginated
+     * conditional user list.
+     *
+     * @param errorCode        Error code.
+     * @param errorMassage     Error Message.
+     * @param domain           User store domain.
+     * @param profileName      Profile name.
+     * @param limit            Number of search results.
+     * @param cursor           Cursor value used in cursor pagination
+     * @param direction        Direction of pagination.
+     * @param sortBy           Sort by attribute.
+     * @param sortOrder        Sort order.
+     * @param userStoreManager User store domain.
+     * @throws UserStoreException UserStoreException
+     */
+    default boolean onGetUserListFailureWithID(String errorCode, String errorMassage, Condition condition,
+                                       String domain, String profileName, int limit, String cursor,
+                                       UserCoreConstants.PaginationDirection direction, String sortBy,
+                                       String sortOrder, UserStoreManager userStoreManager) throws UserStoreException {
+
+        return true;
+    }
 
     /**
      * Defines any additional actions that need to be done if there is a failure retrieving the user.
