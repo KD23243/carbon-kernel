@@ -20,6 +20,7 @@
 package org.wso2.carbon.user.core.common;
 
 import org.wso2.carbon.user.api.Permission;
+import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
 import org.wso2.carbon.user.core.listener.UniqueIDUserOperationEventListener;
@@ -401,6 +402,15 @@ public class AbstractUserOperationEventListener implements UniqueIDUserOperation
     }
 
     @Override
+    public boolean doPreGetUserListWithID(Condition condition, String domain, String profileName, int limit,
+                                          String cursor, UserCoreConstants.PaginationDirection direction, String sortBy,
+                                          String sortOrder, UserStoreManager userStoreManager)
+            throws UserStoreException {
+
+        return true;
+    }
+
+    @Override
     public boolean doPreGetUserListWithID(String claimUri, String claimValue, int limit, int offset,
             final List<User> returnUsersList, UserStoreManager userStoreManager) throws UserStoreException {
 
@@ -439,6 +449,15 @@ public class AbstractUserOperationEventListener implements UniqueIDUserOperation
     @Override
     public boolean doPostGetUserListWithID(Condition condition, String domain, String profileName, int limit,
             int offset, String sortBy, String sortOrder, List<User> users, UserStoreManager userStoreManager)
+            throws UserStoreException {
+
+        return true;
+    }
+
+    @Override
+    public boolean doPostGetUserListWithID(Condition condition, String domain, String profileName, int limit,
+             String cursor, UserCoreConstants.PaginationDirection direction, String sortBy, String sortOrder,
+             List<User> users, UserStoreManager userStoreManager)
             throws UserStoreException {
 
         return true;

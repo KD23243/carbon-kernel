@@ -98,6 +98,7 @@ import javax.naming.ldap.LdapName;
 import javax.naming.ldap.PagedResultsControl;
 import javax.naming.ldap.Rdn;
 import javax.naming.ldap.SortControl;
+import javax.naming.ldap.SortKey;
 
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_CREATED_DATE_ATTRIBUTE;
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_ID_ATTRIBUTE;
@@ -1510,6 +1511,8 @@ public class UniqueIDReadOnlyLDAPUserStoreManager extends ReadOnlyLDAPUserStoreM
      * @param profileName Default profile name.
      * @param limit       The number of entries to return in a page.
      * @param offset      Start index.
+     * @param cursor      Cursor value for pagination.
+     * @param direction   Pagination direction.
      * @param sortBy      Sort according to the given attribute name.
      * @param sortOrder   Sorting order.
      * @return A non-null UniqueIDPaginatedSearchResult instance. Typically contains users list with pagination.
@@ -1518,16 +1521,30 @@ public class UniqueIDReadOnlyLDAPUserStoreManager extends ReadOnlyLDAPUserStoreM
      */
     @Override
     protected UniqueIDPaginatedSearchResult doGetUserListWithID(Condition condition, String profileName, int limit,
-                                                                int offset, String sortBy, String sortOrder)
+                                Integer offset, String cursor, UserCoreConstants.PaginationDirection direction,
+                                String sortBy, String sortOrder)
             throws UserStoreException {
 
         UniqueIDPaginatedSearchResult result = new UniqueIDPaginatedSearchResult();
         List<ExpressionCondition> expressionConditions = getExpressionConditions(condition);
+        if (StringUtils.isNotEmpty(cursor)) {
+            ExpressionCondition cursorCondition = null;
+            if (UserCoreConstants.PaginationDirection.NEXT == direction) {
+                cursorCondition = new ExpressionCondition(ExpressionOperation.GT.toString(),
+                        ExpressionAttribute.USERNAME.toString(), cursor);
+            } else if (UserCoreConstants.PaginationDirection.PREVIOUS == direction) {
+                cursorCondition = new ExpressionCondition(ExpressionOperation.LT.toString(),
+                        ExpressionAttribute.USERNAME.toString(), cursor);
+            }
+            expressionConditions.add(cursorCondition);
+        }
         LDAPSearchSpecification ldapSearchSpecification = new LDAPSearchSpecification(realmConfig,
                 expressionConditions);
         boolean isMemberShipPropertyFound = ldapSearchSpecification.isMemberShipPropertyFound();
         limit = getLimit(limit, isMemberShipPropertyFound);
-        offset = getOffset(offset);
+        if (cursor == null) {
+            offset = getOffset(offset);
+        }
         if (limit == 0) {
             return result;
         }
@@ -1537,9 +1554,27 @@ public class UniqueIDReadOnlyLDAPUserStoreManager extends ReadOnlyLDAPUserStoreM
         List<User> users;
         String userNameAttribute = realmConfig.getUserStoreProperty(LDAPConstants.USER_NAME_ATTRIBUTE);
         try {
-            ldapContext.setRequestControls(new Control[] { new PagedResultsControl(pageSize, Control.CRITICAL),
-                    new SortControl(userNameAttribute, Control.NONCRITICAL) });
-            users = performLDAPSearch(ldapContext, ldapSearchSpecification, pageSize, offset, expressionConditions);
+            if (cursor != null) {
+                if (UserCoreConstants.PaginationDirection.NEXT == direction) {
+                    // RequestControls similar to offset pagination when direction is NEXT.
+                    ldapContext.setRequestControls(new Control[] { new PagedResultsControl(pageSize, Control.CRITICAL),
+                            new SortControl(userNameAttribute, Control.NONCRITICAL) });
+                } else {
+                    // RequestControls have to be arranged in descending order when direction is PREVIOUS.
+                    // Use a SortKeyArray to order in descending order.
+                    SortKey sortKey = new SortKey(userNameAttribute, LDAPConstants.DESCENDING, null);
+                    SortKey[] sortKeyArray = new SortKey[1];
+                    sortKeyArray[0] = sortKey;
+                    ldapContext.setRequestControls(new Control[] { new PagedResultsControl(pageSize, Control.CRITICAL),
+                            new SortControl(sortKeyArray, Control.CRITICAL) });
+                }
+                users = performCursorLDAPSearch(ldapContext, ldapSearchSpecification, pageSize,
+                        expressionConditions, direction);
+            } else {
+                ldapContext.setRequestControls(new Control[] { new PagedResultsControl(pageSize, Control.CRITICAL),
+                        new SortControl(userNameAttribute, Control.NONCRITICAL) });
+                users = performLDAPSearch(ldapContext, ldapSearchSpecification, pageSize, offset, expressionConditions);
+            }
             result.setUsers(users);
             return result;
         } catch (NamingException e) {
@@ -3295,6 +3330,81 @@ public class UniqueIDReadOnlyLDAPUserStoreManager extends ReadOnlyLDAPUserStoreM
             throw new UserStoreException(e.getMessage(), e);
         } catch (IOException e) {
             log.error(String.format("Error occurred while doing paginated search, %s", e.getMessage()));
+            throw new UserStoreException(e.getMessage(), e);
+        } finally {
+            JNDIUtil.closeNamingEnumeration(answer);
+        }
+        return users;
+    }
+
+    private List<User> performCursorLDAPSearch(LdapContext ldapContext, LDAPSearchSpecification ldapSearchSpecification,
+                                         int pageSize, List<ExpressionCondition> expressionConditions,
+                                         UserCoreConstants.PaginationDirection direction)
+            throws UserStoreException {
+
+        boolean isGroupFiltering = ldapSearchSpecification.isGroupFiltering();
+        boolean isUsernameFiltering = ldapSearchSpecification.isUsernameFiltering();
+        boolean isClaimFiltering = ldapSearchSpecification.isClaimFiltering();
+        boolean isMemberShipPropertyFound = ldapSearchSpecification.isMemberShipPropertyFound();
+
+        String searchBases = ldapSearchSpecification.getSearchBases();
+        String[] searchBaseArray = searchBases.split("#");
+        String searchFilter = ldapSearchSpecification.getSearchFilterQuery();
+        SearchControls searchControls = ldapSearchSpecification.getSearchControls();
+        List<String> returnedAttributes = Arrays.asList(searchControls.getReturningAttributes());
+        NamingEnumeration<SearchResult> answer = null;
+        List<User> users = new ArrayList<>();
+        List<User> tempUsersList = new ArrayList<>();
+
+        if (log.isDebugEnabled()) {
+            log.debug(String.format("Searching for user(s) with SearchFilter: %s and page size %d", searchFilter,
+                    pageSize));
+        }
+        try {
+            for (String searchBase : searchBaseArray) {
+
+                    answer = ldapContext.search(escapeDNForSearch(searchBase), searchFilter, searchControls);
+                    // DirContext.search never returns null
+                    if (answer.hasMore()) {
+                        tempUsersList = getUserListFromSearch(isGroupFiltering, returnedAttributes, answer,
+                                isSingleAttributeFilterOperation(expressionConditions));
+                    }
+                    if (CollectionUtils.isNotEmpty(tempUsersList)) {
+                        if (isMemberShipPropertyFound) {
+                                /*
+                                 * Pagination is not supported for 'member' attribute group filtering. We also
+                                 * need do post-processing if we found username filtering or claim filtering,
+                                 * because we can't apply claim filtering with memberShip group filtering and
+                                 * can't apply username filtering with 'CO', 'EW', 'SW' filter operations.
+                                 */
+                            users = membershipGroupFilterPostProcessing(isUsernameFiltering, isClaimFiltering,
+                                    expressionConditions, tempUsersList);
+                            break;
+                        }
+                    }
+                    if (UserCoreConstants.PaginationDirection.PREVIOUS == direction) {
+                        for (int i = tempUsersList.size() - 1; i >= 0; i--) {
+                            users.add(tempUsersList.get(i));
+                        }
+                    } else if (UserCoreConstants.PaginationDirection.NEXT == direction) {
+                        for (int i = 0; i < tempUsersList.size(); i++) {
+                            users.add(tempUsersList.get(i));
+                        }
+                    }
+            }
+        } catch (PartialResultException e) {
+            // Can be due to referrals in AD. So just ignore error.
+            if (isIgnorePartialResultException()) {
+                if (log.isDebugEnabled()) {
+                    log.debug(String.format("Error occurred while searching for user(s) for filter: %s", searchFilter));
+                }
+            } else {
+                log.error(String.format("Error occurred while searching for user(s) for filter: %s", searchFilter));
+                throw new UserStoreException(e.getMessage(), e);
+            }
+        } catch (NamingException e) {
+            log.error(String.format("Error occurred while searching for user(s) for filter: %s, %s",
+                    searchFilter, e.getMessage()));
             throw new UserStoreException(e.getMessage(), e);
         } finally {
             JNDIUtil.closeNamingEnumeration(answer);
