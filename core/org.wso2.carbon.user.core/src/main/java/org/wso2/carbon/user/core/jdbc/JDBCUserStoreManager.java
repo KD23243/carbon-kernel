@@ -4473,7 +4473,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME = ?", expressionCondition.getAttributeValue());
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME = LOWER(?)", expressionCondition.getAttributeValue());
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) = LOWER(?)", expressionCondition.getAttributeValue());
                 }
             } else if (ExpressionOperation.CO.toString().equals(expressionCondition.getOperation()) &&
                     ExpressionAttribute.USERNAME.toString().equals(expressionCondition.getAttributeName())) {
@@ -4481,7 +4481,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", "%" + expressionCondition.getAttributeValue()
                             + "%");
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", "%" +
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", "%" +
                             expressionCondition.getAttributeValue() + "%");
                 }
             } else if (ExpressionOperation.EW.toString().equals(expressionCondition.getOperation()) &&
@@ -4489,7 +4489,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", "%" + expressionCondition.getAttributeValue());
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", "%" +
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", "%" +
                             expressionCondition.getAttributeValue());
                 }
             } else if (ExpressionOperation.SW.toString().equals(expressionCondition.getOperation()) &&
@@ -4497,7 +4497,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", expressionCondition.getAttributeValue() + "%");
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", expressionCondition.getAttributeValue()
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", expressionCondition.getAttributeValue()
                             + "%");
                 }
             } else {
@@ -4766,15 +4766,18 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private int getMaxUserNameListLength() {
 
         int maxUserList;
-        try {
-            maxUserList = Integer.parseInt(realmConfig.getUserStoreProperty(UserCoreConstants.RealmConfig
-                    .PROPERTY_MAX_USER_LIST));
-        } catch (Exception e) {
+        String maxUserListRawValue = realmConfig.getUserStoreProperty(UserCoreConstants.
+                RealmConfig.PROPERTY_MAX_USER_LIST);
+
+        if (StringUtils.isNotEmpty(maxUserListRawValue) && StringUtils.isNumeric(maxUserListRawValue)) {
+            maxUserList = Integer.parseInt(realmConfig.getUserStoreProperty(UserCoreConstants.
+                    RealmConfig.PROPERTY_MAX_USER_LIST));
+        } else {
             // The user store property might not be configured. Therefore logging as debug.
             if (log.isDebugEnabled()) {
                 log.debug("Unable to get the " + UserCoreConstants.RealmConfig.PROPERTY_MAX_USER_LIST +
                         " from the realm configuration. The default value: " + UserCoreConstants.MAX_USER_ROLE_LIST +
-                        " is used instead.", e);
+                        " is used instead.");
             }
             maxUserList = UserCoreConstants.MAX_USER_ROLE_LIST;
         }
@@ -4784,15 +4787,18 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private int getSQLQueryTimeoutLimit() {
 
         int searchTime;
-        try {
-            searchTime = Integer.parseInt(realmConfig
-                    .getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_MAX_SEARCH_TIME));
-        } catch (Exception e) {
-            // The user store property might not be configured. Therefore logging as debug.
+        String searchTimeRawValue = realmConfig.getUserStoreProperty(UserCoreConstants.
+                RealmConfig.PROPERTY_MAX_SEARCH_TIME);
+
+        if (StringUtils.isNotEmpty(searchTimeRawValue) && StringUtils.isNumeric(searchTimeRawValue)) {
+            searchTime = Integer.parseInt(realmConfig.getUserStoreProperty(UserCoreConstants.
+                    RealmConfig.PROPERTY_MAX_SEARCH_TIME));
+        } else {
+            // The user store property might not be configured. Therefore, logging as debug.
             if (log.isDebugEnabled()) {
                 log.debug("Unable to get the " + UserCoreConstants.RealmConfig.PROPERTY_MAX_SEARCH_TIME +
                         " from the realm configuration. The default value: " + UserCoreConstants.MAX_SEARCH_TIME +
-                        " is used instead.", e);
+                        " is used instead.");
             }
             searchTime = UserCoreConstants.MAX_SEARCH_TIME;
         }
