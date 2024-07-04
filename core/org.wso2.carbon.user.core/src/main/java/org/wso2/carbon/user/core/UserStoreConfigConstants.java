@@ -19,6 +19,9 @@ package org.wso2.carbon.user.core;
 
 import org.wso2.carbon.user.core.ldap.LDAPConstants;
 
+/**
+ * This class contains the constants related to User Store Configurations.
+ */
 public class UserStoreConfigConstants {
     public static final String PRIMARY = "PRIMARY";
     public static final String DOMAIN_NAME = "DomainName";
@@ -79,7 +82,9 @@ public class UserStoreConfigConstants {
     public static final String userSearchBaseDescription = "DN of the context under which user entries are stored in LDAP";
     public static final String disabled = "Disabled";
     public static final String disabledDescription = "Whether user store is disabled";
-
+    public static final String referral = "Referral";
+    public static final String referralDisplayName = "Referral";
+    public static final String referralDescription = "Guides the requests to a domain controller in the correct domain";
 
     //Write Group Privilege Properties
     public static final String writeGroups = "WriteGroups";
@@ -173,13 +178,38 @@ public class UserStoreConfigConstants {
     public static final String CONNECTION_RETRY_DELAY_DESCRIPTION = "Specifies waiting time in milliseconds"
             + " inorder to establish the connection after couple of failure attempts.";
     public static final int DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS = 120000;
+    public static final String MAX_CONNECTION_RETRY_DELAY_IN_MILLISECONDS =
+            "UserStore.maxConnectionRetryDelayInMilliSeconds";
+
     public static final String OBJECT_GUID = "objectGuid";
+
+    public static final String CONNECTION_RETRY_COUNT = "ConnectionRetryCount";
+    public static final int DEFAULT_CONNECTION_RETRY_COUNT = 2;
+    public static final String MAX_CONNECTION_RETRY_COUNT = "UserStore.maxConnectionRetryCount";
+    public static final String CONNECTION_RETRY_COUNT_DISPLAY_NAME = "Connection Retry Count";
+    public static final String CONNECTION_RETRY_COUNT_DESCRIPTION = "Specifies connection retry times"
+            + " inorder to re-establish the connection on failure";
 
     // Property for specify case insensitivity for User stores.
     public static final String CASE_INSENSITIVE_USERNAME = "CaseInsensitiveUsername";
     public static final String CASE_INSENSITIVE_USERNAME_DESCRIPTION = "Whether the username is case sensitive or not";
+    public static final String CASE_INSENSITIVE_ATTRIBUTES = "CaseInsensitiveAttributes";
+    public static final String CASE_INSENSITIVE_ATTRIBUTES_DESCRIPTION = "Comma-separated list of user store maintained " +
+            "case insensitive attributes";
+
+    // Property for specify whether case-sensitive username can be used as the cache key.
+    public static final String USE_CASE_SENSITIVE_USERNAME_FOR_CACHE_KEYS = "UseCaseSensitiveUsernameForCacheKeys";
+    public static final String USE_CASE_SENSITIVE_USERNAME_FOR_CACHE_KEYS_DESCRIPTION =
+            "Whether case-sensitive username can be used as the cache key or not.";
 
     // Property to bypass account locking for the userstore.
     public static final String BYPASS_ACCOUNT_LOCK = "BypassAccountLock";
     public static final String BYPASS_ACCOUNT_LOCK_DESCRIPTION = "Enable bypass account locking for the userstore";
+
+    // Property to specify attributes that need to skip multi-valued attribute separation.
+    public static final String singleValuedAttributes = "SingleValuedAttributes";
+    public static final String singleValuedAttributesDescription = "Comma-separated list of attributes that need to " +
+            "skip multi-valued attribute separation";
+    public static final String singleValuedAttributesDisplayName = "Single Valued Attributes";
+
 }

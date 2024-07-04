@@ -1,18 +1,19 @@
 /*
-z * Copyright 2005-2007 WSO2, Inc. (http://wso2.com)
+ * Copyright (c) 2005-2024, WSO2 LLC. (http://www.wso2.com).
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
  * You may obtain a copy of the License at
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS"//also need to clear role authorization
-        userRealm.getAuthorizationManager().cle BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package org.wso2.carbon.user.core.jdbc;
@@ -25,6 +26,7 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.CarbonConstants;
+import org.wso2.carbon.base.ServerConfiguration;
 import org.wso2.carbon.context.CarbonContext;
 import org.wso2.carbon.user.api.Properties;
 import org.wso2.carbon.user.api.Property;
@@ -32,6 +34,7 @@ import org.wso2.carbon.user.api.RealmConfiguration;
 import org.wso2.carbon.user.core.NotImplementedException;
 import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserRealm;
+import org.wso2.carbon.user.core.CircuitBreakerOpenException;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.claim.ClaimManager;
 import org.wso2.carbon.user.core.common.AbstractUserStoreManager;
@@ -41,7 +44,6 @@ import org.wso2.carbon.user.core.common.RoleContext;
 import org.wso2.carbon.user.core.constants.UserCoreErrorConstants;
 import org.wso2.carbon.user.core.dto.RoleDTO;
 import org.wso2.carbon.user.core.exceptions.HashProviderException;
-import org.wso2.carbon.user.core.hash.HashProvider;
 import org.wso2.carbon.user.core.hash.HashProviderFactory;
 import org.wso2.carbon.user.core.hybrid.HybridJDBCConstants;
 import org.wso2.carbon.user.core.internal.UserStoreMgtDataHolder;
@@ -55,6 +57,7 @@ import org.wso2.carbon.user.core.model.SqlBuilder;
 import org.wso2.carbon.user.core.profile.ProfileConfigurationManager;
 import org.wso2.carbon.user.core.tenant.Tenant;
 import org.wso2.carbon.user.core.util.DatabaseUtil;
+import org.wso2.carbon.user.core.util.DatasourceDataHolder;
 import org.wso2.carbon.user.core.util.JDBCRealmUtil;
 import org.wso2.carbon.user.core.util.UserCoreUtil;
 import org.wso2.carbon.utils.Secret;
@@ -72,6 +75,7 @@ import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.SQLTimeoutException;
 import java.sql.Timestamp;
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -84,13 +88,28 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.regex.Matcher;
 import java.util.stream.Collectors;
 import javax.sql.DataSource;
 
+import static org.wso2.carbon.user.core.constants.UserCoreDBConstants.CASE_INSENSITIVE_SQL_STATEMENT_PARAMETER_PLACEHOLDER;
+import static org.wso2.carbon.user.core.constants.UserCoreDBConstants.SQL_STATEMENT_PARAMETER_PLACEHOLDER;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_ADDING_A_USER;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_ADDING_ROLE;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_WRITING_TO_DATABASE;
+import static org.wso2.carbon.user.core.UserCoreConstants.PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE;
+import static org.wso2.carbon.user.core.UserCoreConstants.RealmConfig.CIRCUIT_STATE_OPEN;
+import static org.wso2.carbon.user.core.UserCoreConstants.RealmConfig.CIRCUIT_STATE_CLOSE;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.CONNECTION_RETRY_COUNT;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.CONNECTION_RETRY_DELAY;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_COUNT;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.MAX_CONNECTION_RETRY_COUNT;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.MAX_CONNECTION_RETRY_DELAY_IN_MILLISECONDS;
+
 import static org.wso2.carbon.user.core.util.DatabaseUtil.getLoggableSqlString;
 
 public class JDBCUserStoreManager extends AbstractUserStoreManager {
@@ -103,7 +122,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private static final String SQL_FILTER_CHAR_ESCAPE = "\\";
     public static final String QUERY_BINDING_SYMBOL = "?";
     private static final String CASE_INSENSITIVE_USERNAME = "CaseInsensitiveUsername";
-    private static final String SHA_1_PRNG = "SHA1PRNG";
+    private static final String RANDOM_ALG_DRBG = "DRBG";
 
     protected DataSource jdbcds = null;
     protected Random random = new Random();
@@ -119,10 +138,20 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private static final String POSTGRESQL = "postgresql";
 
     private static final int MAX_ITEM_LIMIT_UNLIMITED = -1;
+    public static final String PRIMARY_USER_STORE_DOMAIN = "PRIMARY";
 
-    public JDBCUserStoreManager() {
+    // Params added to implement Circuit Breaker.
+    private int connectionRetryCount;
+    private String jdbcConnectionCircuitBreakerState;
+    private long thresholdTimeoutInMilliseconds;
+    private long thresholdStartTime;
 
-    }
+    // Added to implement ReadWriteLock concept.
+    private final ReadWriteLock readWriteLock = new ReentrantReadWriteLock();
+    private final Lock writeLock = readWriteLock.writeLock();
+    private final Lock readLock = readWriteLock.readLock();
+
+    public JDBCUserStoreManager() {}
 
     /**
      * @param realmConfig
@@ -242,6 +271,28 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         if (log.isDebugEnabled()) {
             log.debug("Ended " + System.currentTimeMillis());
         }
+
+        /* Set waiting time to re-establish connection after the specified retry count on failure attempts
+          if specified otherwise set default time.
+         */
+        if (StringUtils.isNotEmpty(realmConfig.getUserStoreProperty(CONNECTION_RETRY_DELAY))) {
+            setThresholdTimeoutInMilliseconds(getValidatedThresholdTimeoutInMilliseconds(
+                    Long.parseLong(realmConfig.getUserStoreProperty(CONNECTION_RETRY_DELAY))));
+        } else {
+            setThresholdTimeoutInMilliseconds(DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS);
+        }
+
+        if (StringUtils.isNotEmpty(realmConfig.getUserStoreProperty(CONNECTION_RETRY_COUNT))) {
+            setConnectionRetryCount(getValidatedConnectionRetryCount(
+                    Integer.parseInt(realmConfig.getUserStoreProperty(CONNECTION_RETRY_COUNT))));
+        } else {
+            setConnectionRetryCount(DEFAULT_CONNECTION_RETRY_COUNT);
+        }
+
+        // Used for Circuit breaker: By-default set to close state.
+        setCircuitBreakerState(CIRCUIT_STATE_CLOSE);
+        setThresholdStartTime(0);
+
     }
 
     /**
@@ -295,8 +346,16 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         this.claimManager = claimManager;
         this.userRealm = realm;
 
+        boolean addDataStore = false;
+        // cache secondary user-store datasources.
+        String domain = getMyDomainName();
+        AbstractMap.SimpleEntry<String, String> key = new AbstractMap.SimpleEntry<>(String.valueOf(tenantId), domain);
+        jdbcds = DatasourceDataHolder.getInstance().getDataStoreForDomain(key);
         try {
-            jdbcds = loadUserStoreSpacificDataSoruce();
+            if (jdbcds == null) {
+                addDataStore = !(PRIMARY_USER_STORE_DOMAIN.equals(domain) || tenantId == MultitenantConstants.SUPER_TENANT_ID);
+                jdbcds = loadUserStoreSpacificDataSoruce();
+            }
 
             if (jdbcds == null) {
                 jdbcds = (DataSource) properties.get(UserCoreConstants.DATA_SOURCE);
@@ -304,6 +363,10 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             if (jdbcds == null) {
                 jdbcds = DatabaseUtil.getRealmDataSource(realmConfig);
                 properties.put(UserCoreConstants.DATA_SOURCE, jdbcds);
+            }
+
+            if (addDataStore) {
+                DatasourceDataHolder.getInstance().addDataSourceForDomain(key, jdbcds);
             }
 
             if (log.isDebugEnabled()) {
@@ -324,8 +387,27 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             throw new UserStoreException("User Management Data Source is null");
         }
 
-        properties.put(UserCoreConstants.DATA_SOURCE, dataSource);
+        /* Set waiting time to re-establish connection after the specified retry count on failure attempts
+         * if specified otherwise set default time.
+         */
+        if (StringUtils.isNotEmpty(realmConfig.getUserStoreProperty(CONNECTION_RETRY_DELAY))) {
+            setThresholdTimeoutInMilliseconds(getValidatedThresholdTimeoutInMilliseconds(
+                    Long.parseLong(realmConfig.getUserStoreProperty(CONNECTION_RETRY_DELAY))));
+        } else {
+            setThresholdTimeoutInMilliseconds(DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS);
+        }
 
+        if (StringUtils.isNotEmpty(realmConfig.getUserStoreProperty(CONNECTION_RETRY_COUNT))) {
+            setConnectionRetryCount(getValidatedConnectionRetryCount(
+                    Integer.parseInt(realmConfig.getUserStoreProperty(CONNECTION_RETRY_COUNT))));
+        } else {
+            setConnectionRetryCount(DEFAULT_CONNECTION_RETRY_COUNT);
+        }
+        // Used for Circuit breaker: By-default set to close state.
+        setCircuitBreakerState(CIRCUIT_STATE_CLOSE);
+        setThresholdStartTime(0);
+
+        properties.put(UserCoreConstants.DATA_SOURCE, dataSource);
 
         realmConfig.setUserStoreProperties(JDBCRealmUtil.getSQL(realmConfig
                 .getUserStoreProperties()));
@@ -345,7 +427,6 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             log.debug("Ended " + System.currentTimeMillis());
         }
         /* Initialize user roles cache as implemented in AbstractUserStoreManager */
-
     }
 
     /**
@@ -837,6 +918,13 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         return getUserListOfJDBCRole(roleContext, filter);
     }
 
+    @Override
+    public int doGetUserCountOfRole(String roleName) throws UserStoreException {
+
+        RoleContext roleContext = createRoleContext(roleName);
+        return getUserCountByRole(roleContext);
+    }
+
     /**
      *
      */
@@ -921,6 +1009,33 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     }
 
     /**
+     * Return the count of users belong to the given role for the given {@link RoleContext}.
+     *
+     * @param ctx {@link RoleContext} corresponding to the role.
+     * @throws UserStoreException If an unexpected error occurs in user store.
+     */
+    public int getUserCountByRole(RoleContext ctx) throws UserStoreException {
+
+        String roleName = ctx.getRoleName();
+        Connection dbConnection = null;
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE);
+        try {
+            dbConnection = getDBConnection();
+            return DatabaseUtil.getIntegerValueFromDatabase(
+                    dbConnection, sqlStmt, roleName, tenantId, tenantId, tenantId);
+        } catch (SQLException e) {
+            String errorMessage =
+                    "Error occurred while getting the count of users in the role : " + roleName;
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            throw new UserStoreException(errorMessage, e);
+        } finally {
+            DatabaseUtil.closeAllConnections(dbConnection);
+        }
+    }
+
+    /**
      *
      */
     public boolean doCheckExistingRole(String roleName) throws UserStoreException {
@@ -931,22 +1046,22 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
 
     protected boolean isExistingJDBCRole(RoleContext context) throws UserStoreException {
 
-        boolean isExisting;
         String roleName = context.getRoleName();
-
         String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_IS_ROLE_EXISTING);
-        if (sqlStmt == null) {
+        if (StringUtils.isBlank(sqlStmt)) {
             throw new UserStoreException("The sql statement for is role existing role null");
         }
-
         if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
-            isExisting =
-                    isValueExisting(sqlStmt, null, roleName, ((JDBCRoleContext) context).getTenantId());
-        } else {
-            isExisting = isValueExisting(sqlStmt, null, roleName);
+            return isValueExisting(sqlStmt, null, roleName, ((JDBCRoleContext) context).getTenantId());
         }
+        return isValueExisting(sqlStmt, null, roleName);
+    }
 
-        return isExisting;
+    @Override
+    protected boolean doCheckExistingGroupName(String groupName) throws UserStoreException {
+
+        RoleContext roleContext = createRoleContext(groupName);
+        return isExistingJDBCRole(roleContext);
     }
 
     /**
@@ -1302,7 +1417,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
      * @throws SQLException
      * @throws UserStoreException
      */
-    protected Connection getDBConnection() throws SQLException, UserStoreException {
+    private Connection getConnection() throws SQLException, UserStoreException {
         Connection dbConnection = getJDBCDataSource().getConnection();
         dbConnection.setAutoCommit(false);
         if (dbConnection.getTransactionIsolation() != Connection.TRANSACTION_READ_COMMITTED) {
@@ -1451,7 +1566,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 Timestamp changedTime = rs.getTimestamp(6);
 
                 GregorianCalendar gc = new GregorianCalendar();
-                gc.add(GregorianCalendar.HOUR, -24);
+                gc.add(GregorianCalendar.HOUR, - AbstractUserStoreManager.pwValidityTimeoutInt);
                 Date date = gc.getTime();
 
                 if (requireChange == true && changedTime.before(date)) {
@@ -2618,7 +2733,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 if (requireChange) {
                     GregorianCalendar gc = new GregorianCalendar();
                     gc.setTime(changedTime);
-                    gc.add(GregorianCalendar.HOUR, 24);
+                    gc.add(GregorianCalendar.HOUR, AbstractUserStoreManager.pwValidityTimeoutInt);
                     date = gc.getTime();
                 }
             }
@@ -2642,13 +2757,13 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private String generateSaltValue() {
         String saltValue = null;
         try {
-            SecureRandom secureRandom = SecureRandom.getInstance(SHA_1_PRNG);
+            SecureRandom secureRandom = SecureRandom.getInstance(RANDOM_ALG_DRBG);
             byte[] bytes = new byte[16];
             //secureRandom is automatically seeded by calling nextBytes
             secureRandom.nextBytes(bytes);
             saltValue = Base64.encode(bytes);
         } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("SHA1PRNG algorithm could not be found.");
+            throw new RuntimeException("DRBG algorithm could not be found.");
         }
         return saltValue;
     }
@@ -2675,7 +2790,11 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                     if (param == null) {
                         throw new UserStoreException("Invalid data provided");
                     } else if (param instanceof String) {
-                        prepStmt.setString(i + 1, (String) param);
+                        if (isStoreUserAttributeAsUnicode()) {
+                            prepStmt.setNString(i + 1, (String) param);
+                        } else {
+                            prepStmt.setString(i + 1, (String) param);
+                        }
                     } else if (param instanceof Integer) {
                         prepStmt.setInt(i + 1, (Integer) param);
                     } else if (param instanceof Date) {
@@ -2958,6 +3077,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         } else {
             passwordHash = new String(credentialObj.getChars());
         }
+        credentialObj.clear();
         return passwordHash;
     }
 
@@ -3138,7 +3258,11 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             prepStmt = dbConnection.prepareStatement(sqlStmt);
             int count = 0;
             prepStmt.setString(++count, property);
-            prepStmt.setString(++count, value);
+            if (isStoreUserAttributeAsUnicode()){
+                prepStmt.setNString(++count, value);
+            } else {
+                prepStmt.setString(++count, value);
+            }
             if (sqlStmt.toUpperCase().contains(UserCoreConstants.SQL_ESCAPE_KEYWORD)) {
                 prepStmt.setString(++count, SQL_FILTER_CHAR_ESCAPE);
             }
@@ -3272,38 +3396,29 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         Map<String, Map<String, String>> usersPropertyValuesMap = new HashMap<>();
         try {
             dbConnection = getDBConnection();
-            StringBuilder usernameParameter = new StringBuilder();
+            String dynamicString;
             if (isCaseSensitiveUsername()) {
                 sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_PROPS_FOR_PROFILE);
-                for (int i = 0; i < users.size(); i++) {
-
-                    users.set(i, users.get(i).replaceAll("'", "''"));
-                    usernameParameter.append("'").append(users.get(i)).append("'");
-
-                    if (i != users.size() - 1) {
-                        usernameParameter.append(",");
-                    }
-                }
+                dynamicString = DatabaseUtil.buildDynamicParameterString(SQL_STATEMENT_PARAMETER_PLACEHOLDER,
+                        users.size());
             } else {
                 sqlStmt = realmConfig.getUserStoreProperty(
                         JDBCCaseInsensitiveConstants.GET_USERS_PROPS_FOR_PROFILE_CASE_INSENSITIVE);
-                for (int i = 0; i < users.size(); i++) {
-
-                    users.set(i, users.get(i).replaceAll("'", "''"));
-                    usernameParameter.append("LOWER('").append(users.get(i)).append("')");
-
-                    if (i != users.size() - 1) {
-                        usernameParameter.append(",");
-                    }
-                }
+                dynamicString = DatabaseUtil.buildDynamicParameterString(
+                        CASE_INSENSITIVE_SQL_STATEMENT_PARAMETER_PLACEHOLDER, users.size());
             }
 
-            sqlStmt = sqlStmt.replaceFirst("\\?", Matcher.quoteReplacement(usernameParameter.toString()));
+            sqlStmt = sqlStmt.replaceFirst("\\?", dynamicString);
             prepStmt = dbConnection.prepareStatement(sqlStmt);
-            prepStmt.setString(1, profileName);
+
+            int index = 1;
+            for (String user : users) {
+                prepStmt.setString(index++, user);
+            }
+            prepStmt.setString(index++, profileName);
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
-                prepStmt.setInt(2, tenantId);
-                prepStmt.setInt(3, tenantId);
+                prepStmt.setInt(index++, tenantId);
+                prepStmt.setInt(index, tenantId);
             }
 
             rs = prepStmt.executeQuery();
@@ -3349,44 +3464,35 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
 
         try {
             dbConnection = getDBConnection();
-            StringBuilder usernameParameter = new StringBuilder();
+            String dynamicString;
             if (isCaseSensitiveUsername()) {
                 sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_ROLE);
                 if (sqlStmt == null) {
                     throw new UserStoreException("The sql statement for retrieving users roles is null");
                 }
-                for (int i = 0; i < userNames.size(); i++) {
-
-                    userNames.set(i, userNames.get(i).replaceAll("'", "''"));
-                    usernameParameter.append("'").append(userNames.get(i)).append("'");
-
-                    if (i != userNames.size() - 1) {
-                        usernameParameter.append(",");
-                    }
-                }
+                dynamicString = DatabaseUtil.buildDynamicParameterString(SQL_STATEMENT_PARAMETER_PLACEHOLDER,
+                        userNames.size());
             } else {
                 sqlStmt = realmConfig
                         .getUserStoreProperty(JDBCCaseInsensitiveConstants.GET_USERS_ROLE_CASE_INSENSITIVE);
                 if (sqlStmt == null) {
                     throw new UserStoreException("The sql statement for retrieving users roles is null");
                 }
-                for (int i = 0; i < userNames.size(); i++) {
-
-                    userNames.set(i, userNames.get(i).replaceAll("'", "''"));
-                    usernameParameter.append("LOWER('").append(userNames.get(i)).append("')");
-
-                    if (i != userNames.size() - 1) {
-                        usernameParameter.append(",");
-                    }
-                }
+                dynamicString = DatabaseUtil.buildDynamicParameterString(
+                        CASE_INSENSITIVE_SQL_STATEMENT_PARAMETER_PLACEHOLDER, userNames.size());
             }
 
-            sqlStmt = sqlStmt.replaceFirst("\\?", Matcher.quoteReplacement(usernameParameter.toString()));
+            sqlStmt = sqlStmt.replaceFirst("\\?", dynamicString);
             prepStmt = dbConnection.prepareStatement(sqlStmt);
+
+            int index = 1;
+            for (String userName : userNames) {
+                prepStmt.setString(index++, userName);
+            }
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
-                prepStmt.setInt(1, tenantId);
-                prepStmt.setInt(2, tenantId);
-                prepStmt.setInt(3, tenantId);
+                prepStmt.setInt(index++, tenantId);
+                prepStmt.setInt(index++, tenantId);
+                prepStmt.setInt(index, tenantId);
             }
             rs = prepStmt.executeQuery();
             String domainName = getMyDomainName();
@@ -3504,12 +3610,20 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             throw new UserStoreException(msg, e);
         }
 
-        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.ADD_USER_PROPERTY + "-" + type);
-        if (sqlStmt == null) {
-            sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.ADD_USER_PROPERTY);
+        String sqlStmt;
+        if (isCaseSensitiveUsername()) {
+            sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.ADD_USER_PROPERTY + "-" + type);
+        } else {
+            sqlStmt = realmConfig.getUserStoreProperty(
+                    JDBCCaseInsensitiveConstants.ADD_USER_PROPERTY_CASE_INSENSITIVE + "-" + type);
         }
         if (sqlStmt == null) {
-            throw new UserStoreException("The sql statement for add user property sql is null");
+            if (isCaseSensitiveUsername()) {
+                sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.ADD_USER_PROPERTY);
+            } else {
+                sqlStmt = realmConfig
+                        .getUserStoreProperty(JDBCCaseInsensitiveConstants.ADD_USER_PROPERTY_CASE_INSENSITIVE);
+            }
         }
 
         PreparedStatement prepStmt = null;
@@ -3695,7 +3809,11 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                     if (param == null) {
                         throw new UserStoreException("Invalid data provided");
                     } else if (param instanceof String) {
-                        prepStmt.setString(i + 1, (String) param);
+                        if (isStoreUserAttributeAsUnicode()) {
+                            prepStmt.setNString(i + 1, (String) param);
+                        } else {
+                            prepStmt.setString(i + 1, (String) param);
+                        }
                     } else if (param instanceof Integer) {
                         prepStmt.setInt(i + 1, (Integer) param);
                     } else if (param instanceof Date) {
@@ -3923,7 +4041,8 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         String sqlStmt;
         if (isUserNameClaim(claimUri)) {
             sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.COUNT_USERS);
-
+        } else if (ExpressionOperation.EQ.toString().equalsIgnoreCase(valueFilter)) {
+            sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.COUNT_USERS_WITH_FILTER);
         } else {
             sqlStmt = JDBCRealmConstants.COUNT_USERS_WITH_CLAIM_SQL;
         }
@@ -3946,10 +4065,17 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             if (isUserNameClaim(claimUri)) {
                 prepStmt.setString(1, valueFilter);
                 prepStmt.setInt(2, tenantId);
+            } else if (ExpressionOperation.EQ.toString().equalsIgnoreCase(valueFilter)) {
+                prepStmt.setString(1, claimUri);
+                prepStmt.setInt(2, tenantId);
             } else {
                 prepStmt.setString(1, userRealm.getClaimManager().getAttributeName(domainName, claimUri));
                 prepStmt.setInt(2, tenantId);
-                prepStmt.setString(3, valueFilter);
+                if (isStoreUserAttributeAsUnicode()) {
+                    prepStmt.setNString(3, valueFilter);
+                } else {
+                    prepStmt.setString(3, valueFilter);
+                }
                 prepStmt.setString(4, UserCoreConstants.DEFAULT_PROFILE);
             }
 
@@ -4161,7 +4287,11 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             }
             prepStmt = dbConnection.prepareStatement(sqlStmt);
             prepStmt.setString(1, property);
-            prepStmt.setString(2, value);
+            if (isStoreUserAttributeAsUnicode()) {
+                prepStmt.setNString(2, value);
+            } else {
+                prepStmt.setString(2, value);
+            }
             prepStmt.setString(3, profileName);
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
                 prepStmt.setInt(4, tenantId);
@@ -4333,7 +4463,11 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
 
         for (Map.Entry<Integer, String> entry : stringParameters.entrySet()) {
             if (entry.getKey() > startIndex && entry.getKey() <= endIndex) {
-                prepStmt.setString(entry.getKey() - startIndex, entry.getValue());
+                if (isStoreUserAttributeAsUnicode()){
+                    prepStmt.setNString(entry.getKey() - startIndex, entry.getValue());
+                } else {
+                    prepStmt.setString(entry.getKey() - startIndex, entry.getValue());
+                }
             }
         }
 
@@ -4473,7 +4607,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME = ?", expressionCondition.getAttributeValue());
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME = LOWER(?)", expressionCondition.getAttributeValue());
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) = LOWER(?)", expressionCondition.getAttributeValue());
                 }
             } else if (ExpressionOperation.CO.toString().equals(expressionCondition.getOperation()) &&
                     ExpressionAttribute.USERNAME.toString().equals(expressionCondition.getAttributeName())) {
@@ -4481,7 +4615,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", "%" + expressionCondition.getAttributeValue()
                             + "%");
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", "%" +
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", "%" +
                             expressionCondition.getAttributeValue() + "%");
                 }
             } else if (ExpressionOperation.EW.toString().equals(expressionCondition.getOperation()) &&
@@ -4489,7 +4623,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", "%" + expressionCondition.getAttributeValue());
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", "%" +
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", "%" +
                             expressionCondition.getAttributeValue());
                 }
             } else if (ExpressionOperation.SW.toString().equals(expressionCondition.getOperation()) &&
@@ -4497,7 +4631,7 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", expressionCondition.getAttributeValue() + "%");
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", expressionCondition.getAttributeValue()
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", expressionCondition.getAttributeValue()
                             + "%");
                 }
             } else {
@@ -4528,7 +4662,24 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             if (DB2.equals(dbType)) {
                 sqlBuilder.setTail(") AS p) WHERE rn BETWEEN ? AND ?", limit, offset);
             } else if (MSSQL.equals(dbType)) {
-                sqlBuilder.setTail(") AS R) AS P WHERE P.RowNum BETWEEN ? AND ?", limit, offset);
+                if (isClaimFiltering && !isGroupFiltering && totalMulitClaimFitlers > 1) {
+                    StringBuilder alias = new StringBuilder(") As Q0");
+                    /*
+                     * x is used to count the number of sub queries.
+                     * (totalMultiClaimFilters * 2) --> totalMultiClaims are multiplied by 2 as 2 sub queries for
+                     * every new claim.
+                     * (totalMultiClaimFilters * 2) - 1 is deducted as there is 1 sub query in the SQL query.
+                     */
+                    int x;
+                    for ( x = 1; x <= (totalMulitClaimFitlers * 2 - 1); x++) {
+                        alias = alias.append(" ) AS Q" + x );
+                    }
+                    String tail = alias.toString().concat(" WHERE Q" + String.valueOf(x-1) + ".RowNum BETWEEN ? AND ?");
+                    // Handle multi attribute filtering without group filtering.
+                    sqlBuilder.setTail(tail, limit, offset);
+                } else {
+                    sqlBuilder.setTail(") AS R) AS P WHERE P.RowNum BETWEEN ? AND ?", limit, offset);
+                }
             } else if (ORACLE.equals(dbType)) {
                 sqlBuilder.setTail(" ORDER BY UM_USER_NAME) where rownum <= ?) WHERE  rnum > ?", limit, offset);
             } else {
@@ -4610,13 +4761,29 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         sqlBuilder.where("UA.UM_ATTR_NAME = ?", attributeName);
 
         if (ExpressionOperation.EQ.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) = LOWER(?)", attributeValue);
+            }
         } else if (ExpressionOperation.EW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue);
+            }
         } else if (ExpressionOperation.CO.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue + "%");
+            }
         } else if (ExpressionOperation.SW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", attributeValue + "%");
+            }
         }
     }
 
@@ -4638,13 +4805,29 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
         sqlBuilder.updateSqlWithOROperation("UA.UM_ATTR_NAME = ?", attributeName);
 
         if (ExpressionOperation.EQ.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) = LOWER(?)", attributeValue);
+            }
         } else if (ExpressionOperation.EW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue);
+            }
         } else if (ExpressionOperation.CO.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue + "%");
+            }
         } else if (ExpressionOperation.SW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", attributeValue + "%");
+            }
         }
     }
 
@@ -4711,7 +4894,11 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
             sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_PAGINATED_USERS_COUNT_FOR_PROP);
             prepStmt = dbConnection.prepareStatement(sqlStmt);
             prepStmt.setString(1, property);
-            prepStmt.setString(2, value);
+            if (isStoreUserAttributeAsUnicode()) {
+                prepStmt.setNString(2, value);
+            } else {
+                prepStmt.setString(2, value);
+            }
             prepStmt.setString(3, profileName);
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
                 prepStmt.setInt(4, tenantId);
@@ -4766,15 +4953,18 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private int getMaxUserNameListLength() {
 
         int maxUserList;
-        try {
-            maxUserList = Integer.parseInt(realmConfig.getUserStoreProperty(UserCoreConstants.RealmConfig
-                    .PROPERTY_MAX_USER_LIST));
-        } catch (Exception e) {
+        String maxUserListRawValue = realmConfig.getUserStoreProperty(UserCoreConstants.
+                RealmConfig.PROPERTY_MAX_USER_LIST);
+
+        if (StringUtils.isNotEmpty(maxUserListRawValue) && StringUtils.isNumeric(maxUserListRawValue)) {
+            maxUserList = Integer.parseInt(realmConfig.getUserStoreProperty(UserCoreConstants.
+                    RealmConfig.PROPERTY_MAX_USER_LIST));
+        } else {
             // The user store property might not be configured. Therefore logging as debug.
             if (log.isDebugEnabled()) {
                 log.debug("Unable to get the " + UserCoreConstants.RealmConfig.PROPERTY_MAX_USER_LIST +
                         " from the realm configuration. The default value: " + UserCoreConstants.MAX_USER_ROLE_LIST +
-                        " is used instead.", e);
+                        " is used instead.");
             }
             maxUserList = UserCoreConstants.MAX_USER_ROLE_LIST;
         }
@@ -4784,15 +4974,18 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private int getSQLQueryTimeoutLimit() {
 
         int searchTime;
-        try {
-            searchTime = Integer.parseInt(realmConfig
-                    .getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_MAX_SEARCH_TIME));
-        } catch (Exception e) {
-            // The user store property might not be configured. Therefore logging as debug.
+        String searchTimeRawValue = realmConfig.getUserStoreProperty(UserCoreConstants.
+                RealmConfig.PROPERTY_MAX_SEARCH_TIME);
+
+        if (StringUtils.isNotEmpty(searchTimeRawValue) && StringUtils.isNumeric(searchTimeRawValue)) {
+            searchTime = Integer.parseInt(realmConfig.getUserStoreProperty(UserCoreConstants.
+                    RealmConfig.PROPERTY_MAX_SEARCH_TIME));
+        } else {
+            // The user store property might not be configured. Therefore, logging as debug.
             if (log.isDebugEnabled()) {
                 log.debug("Unable to get the " + UserCoreConstants.RealmConfig.PROPERTY_MAX_SEARCH_TIME +
                         " from the realm configuration. The default value: " + UserCoreConstants.MAX_SEARCH_TIME +
-                        " is used instead.", e);
+                        " is used instead.");
             }
             searchTime = UserCoreConstants.MAX_SEARCH_TIME;
         }
@@ -4819,5 +5012,335 @@ public class JDBCUserStoreManager extends AbstractUserStoreManager {
     private boolean isH2DB(Connection dbConnection) throws Exception {
 
         return H2.equalsIgnoreCase(DatabaseCreator.getDatabaseType(dbConnection));
+    }
+
+    /**
+     * Check if storing user attribute values as unicode is enabled.
+     *
+     * @return true if DB2, false otherwise.
+     */
+    public boolean isStoreUserAttributeAsUnicode() {
+
+        return Boolean.parseBoolean(realmConfig.getUserStoreProperty(
+                JDBCUserStoreConstants.STORE_USER_ATTRIBUTE_VALUE_AS_UNICODE));
+    }
+
+    /**
+     * Circuit Breaker pattern added for DB connection retrieval.
+     *          Renamed original getDBConnection() method to getConnection() to minimize changes.
+     *
+     * @return DB Connection.
+     * @throws UserStoreException if unknown occurred while getting database connection.
+     * @throws SQLException if error occurred while retrieving database connection.
+     */
+    protected Connection getDBConnection() throws UserStoreException, SQLException {
+
+        Connection dbConnection = null;
+
+        /* Validate whether circuit breaker is enabled for userstores.*/
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance()
+                .getFirstProperty(PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE))) {
+            switch (getCircuitBreakerState()) {
+                case CIRCUIT_STATE_OPEN:
+                    dbConnection = getConnectionOnCircuitBreakerOpen();
+                    log.info("Successfully recovered DB connection for domain: " + getMyDomainName());
+                    break;
+                case CIRCUIT_STATE_CLOSE:
+                    dbConnection = getConnectionOnCircuitBreakerClose();
+                    break;
+                default:
+                    throw new UserStoreException("Unknown JDBC connection circuit breaker state.");
+            }
+            return dbConnection;
+        }
+        return getConnection();
+    }
+
+    /**
+     * Attempts and returns the DB Connection when the circuit Breaker is in open state.
+     ** @return returns the DB connection.
+     *
+     * @throws CircuitBreakerOpenException An error occurred while attempting to retrieve the DB connection.
+     */
+    private Connection getConnectionOnCircuitBreakerOpen() throws UserStoreException {
+
+        long circuitOpenDuration = System.currentTimeMillis() - getThresholdStartTime();
+        if (log.isDebugEnabled()) {
+            log.debug("Trying to obtain JDBC connection for domain: " + getMyDomainName()
+                    + " when circuit breaker state is " + getCircuitBreakerState()
+                    + " and circuit breaker open duration: " + circuitOpenDuration + "ms.");
+        }
+
+        if (circuitOpenDuration >= getValidatedThresholdTimeoutInMilliseconds(getThresholdTimeoutInMilliseconds())) {
+            try {
+                Connection dbConnection = getConnection();
+                setCircuitBreakerState(CIRCUIT_STATE_CLOSE);
+                setThresholdStartTime(0);
+                return dbConnection;
+            } catch (Exception e) {
+                log.warn("Error occurred while trying to obtaining connection for domain: " + getMyDomainName()
+                        + ". Circuit Breaker state for domain: " + getMyDomainName() + " is set to "
+                        + getCircuitBreakerState());
+                setThresholdStartTime(System.currentTimeMillis());
+
+                throw new CircuitBreakerOpenException("Error occurred while obtaining connection.", e);
+            }
+        } else {
+            throw new CircuitBreakerOpenException(
+                    "JDBC Connection circuit breaker is in open state for " + circuitOpenDuration
+                            + "ms and has not reach the threshold timeout: " + getThresholdTimeoutInMilliseconds()
+                            + "ms, hence avoid establishing the connection for domain " + getMyDomainName());
+        }
+    }
+
+    /**
+     * Attempts and returns the DB Connection when the circuit Breaker is in closed state.
+     * @return returns the DB connection.
+     *
+     * @throws CircuitBreakerOpenException An error occurred while attempting to retrieve the DB connection.
+     */
+    private Connection getConnectionOnCircuitBreakerClose() throws UserStoreException {
+
+        if (log.isDebugEnabled()) {
+            log.debug("Connection circuit breaker state: " + getCircuitBreakerState()
+                    + ", so trying to obtain the connection for domain " + getMyDomainName());
+        }
+        int retryCounter = 0;
+        while (true) {
+            try {
+                return getConnection();
+            } catch (Exception e) {
+                log.warn("Error occurred while obtaining JDBC connection for domain " + getMyDomainName()
+                        + ". Hence, retry attempt to recover DB connection: " + retryCounter);
+
+                if (++retryCounter >= getValidatedConnectionRetryCount(getConnectionRetryCount())) {
+                    log.error("Retry count exceeds above the maximum count: " + getConnectionRetryCount()
+                            + " and failed for domain " + getMyDomainName());
+                    setCircuitBreakerState(CIRCUIT_STATE_OPEN);
+                    setThresholdStartTime(System.currentTimeMillis());
+                    throw new CircuitBreakerOpenException("Error occurred while obtaining connection for domain: "
+                            + getMyDomainName() + " and circuit breaker state set to: " + getCircuitBreakerState(), e);
+                }
+            }
+        }
+    }
+
+    /**
+     * Sets threadsafe JDBC ConnectionCircuitBreakerState.
+     *
+     * @param jdbcConnectionCircuitBreakerState JDBC ConnectionCircuitBreakerState.
+     */
+    public void setCircuitBreakerState(String jdbcConnectionCircuitBreakerState) {
+
+        writeLock.lock();
+        try {
+            this.jdbcConnectionCircuitBreakerState = jdbcConnectionCircuitBreakerState;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * Sets threadsafe thresholdTimeoutInMilliseconds.
+     *
+     * @param thresholdTimeoutInMilliseconds threshold Timeout in Milliseconds.
+     */
+    public void setThresholdTimeoutInMilliseconds(long thresholdTimeoutInMilliseconds) {
+
+        writeLock.lock();
+        try {
+            this.thresholdTimeoutInMilliseconds = thresholdTimeoutInMilliseconds;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * Sets threadsafe thresholdStartTime.
+     *
+     * @param thresholdStartTime Threshold Start Time.
+     */
+    public void setThresholdStartTime(long thresholdStartTime) {
+
+        writeLock.lock();
+        try {
+            this.thresholdStartTime = thresholdStartTime;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * Sets threadsafe connectionRetryCount.
+     *
+     * @param connectionRetryCount Connection Retry Count.
+     */
+    public void setConnectionRetryCount(int connectionRetryCount) {
+
+        writeLock.lock();
+        try {
+            this.connectionRetryCount = connectionRetryCount;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    /**
+     * Returns threadsafe connectionRetryCount.
+     *
+     * @return returns connectionRetryCount.
+     */
+    public int getConnectionRetryCount() {
+
+        return connectionRetryCount;
+    }
+
+    /**
+     * Returns threadsafe thresholdStartTime.
+     *
+     * @return returns thresholdStartTime.
+     */
+    public long getThresholdStartTime() {
+
+        readLock.lock();
+        try	{
+            return thresholdStartTime;
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    /**
+     * Returns threadsafe JDBC ConnectionCircuitBreakerState.
+     *
+     * @return returns jdbcConnectionCircuitBreakerState.
+     */
+    public String getCircuitBreakerState() {
+
+        readLock.lock();
+        try	{
+            return jdbcConnectionCircuitBreakerState;
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    /**
+     * Returns threadsafe thresholdTimeoutInMilliseconds.
+     *
+     * @return returns thresholdTimeoutInMilliseconds.
+     */
+    public long getThresholdTimeoutInMilliseconds() {
+
+        readLock.lock();
+        try	{
+            return thresholdTimeoutInMilliseconds;
+        } finally {
+            readLock.unlock();
+        }
+    }
+
+    /**
+     * Convert retry waiting time string to long returning the
+     *      value after validating with max allowed connection retry delay.
+     *
+     * @param retryWaitingTime Retry waiting time as a string.
+     * @return Allowed Retry waiting time in milliseconds.
+     *
+     * @throws UserStoreException An error occurred while parsing the property value.
+     */
+    protected long getValidatedThresholdTimeoutInMilliseconds(long retryWaitingTime) throws UserStoreException {
+
+        try {
+
+            String maxRetryWaitingTime = ServerConfiguration.getInstance()
+                    .getFirstProperty(MAX_CONNECTION_RETRY_DELAY_IN_MILLISECONDS);
+            if (maxRetryWaitingTime != null && (retryWaitingTime <= Long.parseLong(maxRetryWaitingTime))) {
+                return retryWaitingTime;
+            }
+
+            if (StringUtils.isNotEmpty(maxRetryWaitingTime)) {
+                setThresholdStartTime(Long.parseLong(maxRetryWaitingTime));
+                if (log.isDebugEnabled()) {
+                    log.debug("Connection retry delay in milliseconds configured exceeds the allowed "
+                            + "waiting time. Hence, returning the max allowed connection retry delay in milliseconds: "
+                            + maxRetryWaitingTime);
+                }
+                return Long.parseLong(maxRetryWaitingTime);
+            }
+
+            if (log.isDebugEnabled()) {
+                log.debug("Max Connection retry delay is not configured. Hence, returning the default "
+                        + "connection retry delay in milliseconds: " + DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS);
+            }
+            setThresholdStartTime(DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS);
+            return DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS;
+
+        } catch (NumberFormatException e) {
+            throw new UserStoreException("Error occurred while parsing ConnectionRetryDelay property value");
+        }
+    }
+
+    /**
+     * Convert connection retry count string to int returning the
+     *       value after validating with max allowed connection retry count.
+     *
+     * @param connectionRetryCount Retry connection count as a string.
+     * @return Allowed Retry connection count.
+     *
+     * @throws UserStoreException An error occurred while parsing the property value.
+     */
+    protected int getValidatedConnectionRetryCount(int connectionRetryCount) throws UserStoreException {
+
+        try {
+
+            String maxConnectionRetryCount = ServerConfiguration.getInstance()
+                    .getFirstProperty(MAX_CONNECTION_RETRY_COUNT);
+            if (maxConnectionRetryCount != null && (connectionRetryCount
+                    <= Integer.parseInt(maxConnectionRetryCount))) {
+                return connectionRetryCount;
+            }
+
+            if (StringUtils.isNotEmpty(maxConnectionRetryCount)) {
+                setConnectionRetryCount(Integer.parseInt(maxConnectionRetryCount));
+                if (log.isDebugEnabled()) {
+                    log.debug("Connection retry count configured exceeds the allowed max connection retry count. "
+                            + "Hence, returning the max allowed retry count: " + maxConnectionRetryCount);
+                }
+                return Integer.parseInt(maxConnectionRetryCount);
+            }
+            if (log.isDebugEnabled()) {
+                log.debug("Max Connection retry count is not configured. Hence, returning the default "
+                        + "allowed retry count: " + DEFAULT_CONNECTION_RETRY_COUNT);
+            }
+            setConnectionRetryCount(DEFAULT_CONNECTION_RETRY_COUNT);
+            return DEFAULT_CONNECTION_RETRY_COUNT;
+
+        } catch (NumberFormatException e) {
+            throw new UserStoreException("Error occurred while parsing ConnectionRetryCount property value.");
+        }
+    }
+
+    /**
+     * Verify Circuit Breaker state for user store.
+     *
+     * @return true if CircuitBreaker Open, false otherwise.
+     */
+    public boolean isCircuitBreakerEnabledAndOpen() throws UserStoreException {
+
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance()
+                .getFirstProperty(PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE))) {
+
+            long circuitOpenDuration = System.currentTimeMillis() - getThresholdStartTime();
+            if (CIRCUIT_STATE_OPEN.equals(getCircuitBreakerState()) && circuitOpenDuration
+                    <= getValidatedThresholdTimeoutInMilliseconds(getThresholdTimeoutInMilliseconds())) {
+
+                log.warn("JDBC connection circuit breaker is in open state for " + circuitOpenDuration
+                        + "ms and has not reach the threshold timeout: " + getThresholdTimeoutInMilliseconds()
+                        + "ms, hence avoid establishing the " + getMyDomainName() + " domain JDBC connection.");
+                return true;
+            }
+        }
+        return false;
     }
 }

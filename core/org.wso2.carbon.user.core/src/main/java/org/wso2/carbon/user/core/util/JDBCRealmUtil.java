@@ -1,17 +1,19 @@
 /*
- * Copyright 2009-2010 WSO2, Inc. (http://wso2.com)
+ * Copyright (c) 2009-2024, WSO2 LLC. (http://www.wso2.com).
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
  * You may obtain a copy of the License at
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 package org.wso2.carbon.user.core.util;
 
@@ -125,6 +127,10 @@ public class JDBCRealmUtil {
             properties.put(JDBCRealmConstants.GET_USER_FILTER_WITH_ID,
                     JDBCRealmConstants.GET_USER_FILTER_WITH_ID_SQL);
         }
+        if (!properties.containsKey(JDBCRealmConstants.GET_USER_FILTER_WITH_ID_WITH_ESCAPE)) {
+            properties.put(JDBCRealmConstants.GET_USER_FILTER_WITH_ID_WITH_ESCAPE,
+                    JDBCRealmConstants.GET_USER_FILTER_WITH_ID_WITH_ESCAPE_SQL);
+        }
         if (!properties.containsKey(JDBCRealmConstants.GET_USER_FILTER_WITH_ESCAPE)) {
             properties.put(JDBCRealmConstants.GET_USER_FILTER_WITH_ESCAPE,
                     JDBCRealmConstants.GET_USER_FILTER_SQL_WITH_ESCAPE);
@@ -221,6 +227,14 @@ public class JDBCRealmUtil {
             properties.put(JDBCRealmConstants.GET_USERS_FOR_PROP_WITH_ID,
                     JDBCRealmConstants.GET_USERS_FOR_PROP_WITH_ID_SQL);
         }
+        if (!properties.containsKey(JDBCRealmConstants.GET_USERS_FOR_USERNAME)) {
+            properties.put(JDBCRealmConstants.GET_USERS_FOR_USERNAME,
+                    JDBCRealmConstants.GET_USERS_FOR_USERNAME_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.GET_USER_FOR_USERNAME)) {
+            properties.put(JDBCRealmConstants.GET_USER_FOR_USERNAME,
+                    JDBCRealmConstants.GET_USER_FOR_USERNAME_SQL);
+        }
         if (!properties.containsKey(JDBCRealmConstants.GET_USERS_FOR_CLAIM_VALUE_WITH_ID)) {
             properties.put(JDBCRealmConstants.GET_USERS_FOR_CLAIM_VALUE_WITH_ID,
                     JDBCRealmConstants.GET_USERS_FOR_CLAIM_VALUE_WITH_ID_SQL);
@@ -228,6 +242,14 @@ public class JDBCRealmUtil {
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USERS_FOR_PROP_WITH_ID_CASE_INSENSITIVE)) {
             properties.put(JDBCCaseInsensitiveConstants.GET_USERS_FOR_PROP_WITH_ID_CASE_INSENSITIVE,
                     JDBCCaseInsensitiveConstants.GET_USERS_FOR_PROP_WITH_ID_SQL_CASE_INSENSITIVE);
+        }
+        if(!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USERS_FOR_USERNAME_WITH_USERNAME_CASE_INSENSITIVE)) {
+            properties.put(JDBCCaseInsensitiveConstants.GET_USERS_FOR_USERNAME_WITH_USERNAME_CASE_INSENSITIVE,
+                    JDBCCaseInsensitiveConstants.GET_USERS_FOR_USERNAME_WITH_USERNAME_SQL_CASE_INSENSITIVE);
+        }
+        if(!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USER_FOR_USERNAME_WITH_USERNAME_CASE_INSENSITIVE)) {
+            properties.put(JDBCCaseInsensitiveConstants.GET_USER_FOR_USERNAME_WITH_USERNAME_CASE_INSENSITIVE,
+                    JDBCCaseInsensitiveConstants.GET_USER_FOR_USERNAME_WITH_USERNAME_SQL_CASE_INSENSITIVE);
         }
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USERS_FOR_CLAIM_VALUE_WITH_ID_CASE_INSENSITIVE)) {
             properties.put(JDBCCaseInsensitiveConstants.GET_USERS_FOR_CLAIM_VALUE_WITH_ID_CASE_INSENSITIVE,
@@ -395,6 +417,10 @@ public class JDBCRealmUtil {
             properties.put(JDBCRealmConstants.COUNT_USERS,
                     JDBCRealmConstants.COUNT_USERS_SQL);
         }
+        if (!properties.containsKey(JDBCRealmConstants.COUNT_USERS_WITH_FILTER)) {
+            properties.put(JDBCRealmConstants.COUNT_USERS_WITH_FILTER,
+                    JDBCRealmConstants.COUNT_USERS_WITH_FILTER_SQL);
+        }
         if (!properties.containsKey(JDBCRealmConstants.COUNT_INTERNAL_ROLES)) {
             properties.put(JDBCRealmConstants.COUNT_INTERNAL_ROLES,
                     JDBCRealmConstants.COUNT_INTERNAL_ROLES_SQL);
@@ -455,6 +481,10 @@ public class JDBCRealmUtil {
             properties.put(JDBCRealmConstants.UPDATE_USER_PROPERTY_WITH_ID,
                     JDBCRealmConstants.UPDATE_USER_PROPERTY_WITH_ID_SQL);
         }
+        if (!properties.containsKey(JDBCRealmConstants.SELECT_USER_PROPERTIES_WITH_ID)) {
+            properties.put(JDBCRealmConstants.SELECT_USER_PROPERTIES_WITH_ID,
+                    JDBCRealmConstants.SELECT_USER_PROPERTIES_WITH_ID_SQL);
+        }
         if (!properties.containsKey(JDBCRealmConstants.DELETE_USER_PROPERTY)) {
             properties.put(JDBCRealmConstants.DELETE_USER_PROPERTY,
                     JDBCRealmConstants.DELETE_USER_PROPERTY_SQL);
@@ -507,6 +537,20 @@ public class JDBCRealmUtil {
                     JDBCRealmConstants.GET_USERS_PROPS_FOR_PROFILE_WITH_ID_SQL);
         }
 
+        if (!properties.containsKey(JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE)) {
+            properties.put(JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE,
+                    JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE_SQL);
+        }
+
+        if (!properties.containsKey(JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE_WITH_ID)) {
+            properties.put(JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE_WITH_ID,
+                    JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE_SQL_WITH_ID);
+        }
+
+        if (!properties.containsKey(JDBCRealmConstants.GET_ROLE_ID_BY_NAME)) {
+            properties.put(JDBCRealmConstants.GET_ROLE_ID_BY_NAME, JDBCRealmConstants.GET_ROLE_ID_BY_NAME_SQL);
+        }
+
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USERS_PROPS_FOR_PROFILE_CASE_INSENSITIVE)) {
             properties.put(JDBCCaseInsensitiveConstants.GET_USERS_PROPS_FOR_PROFILE_CASE_INSENSITIVE,
                     JDBCCaseInsensitiveConstants.GET_USERS_PROPS_FOR_PROFILE_SQL_CASE_INSENSITIVE);
@@ -515,6 +559,40 @@ public class JDBCRealmUtil {
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USERS_ROLE_CASE_INSENSITIVE)) {
             properties.put(JDBCCaseInsensitiveConstants.GET_USERS_ROLE_CASE_INSENSITIVE, JDBCCaseInsensitiveConstants
                     .GET_USERS_ROLE_SQL_CASE_INSENSITIVE);
+        }
+
+        if (!properties.containsKey(JDBCRealmConstants.GET_GROUP_ID_FROM_GROUP_NAME)) {
+            properties.put(JDBCRealmConstants.GET_GROUP_ID_FROM_GROUP_NAME,
+                    JDBCRealmConstants.GET_GROUP_ID_FROM_GROUP_NAME_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.GET_GROUP_NAME_FROM_GROUP_ID)) {
+            properties.put(JDBCRealmConstants.GET_GROUP_NAME_FROM_GROUP_ID,
+                    JDBCRealmConstants.GET_GROUP_NAME_FROM_GROUP_ID_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.GET_GROUP_FROM_GROUP_NAME)) {
+            properties.put(JDBCRealmConstants.GET_GROUP_FROM_GROUP_NAME,
+                    JDBCRealmConstants.GET_GROUP_FROM_GROUP_NAME_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.GET_GROUP_FROM_GROUP_ID)) {
+            properties.put(JDBCRealmConstants.GET_GROUP_FROM_GROUP_ID, JDBCRealmConstants.GET_GROUP_FROM_GROUP_ID_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.GET_GROUP_FILTER_WITH_GROUP_ID)) {
+            properties.put(JDBCRealmConstants.GET_GROUP_FILTER_WITH_GROUP_ID,
+                    JDBCRealmConstants.GET_GROUP_FILTER_WITH_GROUP_ID_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.GET_GROUP_FILTER_WITH_CREATED_DATE)) {
+            properties.put(JDBCRealmConstants.GET_GROUP_FILTER_WITH_CREATED_DATE,
+                    JDBCRealmConstants.GET_GROUP_FILTER_WITH_CREATED_DATE_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.GET_GROUP_FILTER_WITH_LAST_MODIFIED)) {
+            properties.put(JDBCRealmConstants.GET_GROUP_FILTER_WITH_LAST_MODIFIED,
+                    JDBCRealmConstants.GET_GROUP_FILTER_WITH_LAST_MODIFIED_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.ADD_GROUP)) {
+            properties.put(JDBCRealmConstants.ADD_GROUP, JDBCRealmConstants.ADD_GROUP_SQL);
+        }
+        if (!properties.containsKey(JDBCRealmConstants.UPDATE_GROUP_NAME)) {
+            properties.put(JDBCRealmConstants.UPDATE_GROUP_NAME, JDBCRealmConstants.UPDATE_GROUP_NAME_SQL);
         }
 
         //openedge
@@ -570,6 +648,10 @@ public class JDBCRealmUtil {
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_CASE_INSENSITIVE)) {
             properties.put(JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_CASE_INSENSITIVE,
                     JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_SQL_CASE_INSENSITIVE);
+        }
+        if (!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_CASE_INSENSITIVE_WITH_ESCAPE)) {
+            properties.put(JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_CASE_INSENSITIVE_WITH_ESCAPE,
+                    JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_SQL_CASE_INSENSITIVE_WITH_ESCAPE);
         }
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.GET_USER_FILTER_CASE_INSENSITIVE_WITH_ESCAPE)) {
             properties.put(JDBCCaseInsensitiveConstants.GET_USER_FILTER_CASE_INSENSITIVE_WITH_ESCAPE,
@@ -685,6 +767,10 @@ public class JDBCRealmUtil {
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.USER_NAME_UNIQUE_CASE_INSENSITIVE_WITH_ID)) {
             properties.put(JDBCCaseInsensitiveConstants.USER_NAME_UNIQUE_CASE_INSENSITIVE_WITH_ID,
                     JDBCCaseInsensitiveConstants.USER_NAME_UNIQUE_SQL_CASE_INSENSITIVE_WITH_ID);
+        }
+        if (!properties.containsKey(JDBCCaseInsensitiveConstants.ADD_USER_PROPERTY_CASE_INSENSITIVE)) {
+            properties.put(JDBCCaseInsensitiveConstants.ADD_USER_PROPERTY_CASE_INSENSITIVE,
+                    JDBCCaseInsensitiveConstants.ADD_USER_PROPERTY_SQL_CASE_INSENSITIVE);
         }
         if (!properties.containsKey(JDBCCaseInsensitiveConstants.UPDATE_USER_PROPERTY_CASE_INSENSITIVE)) {
             properties.put(JDBCCaseInsensitiveConstants.UPDATE_USER_PROPERTY_CASE_INSENSITIVE,

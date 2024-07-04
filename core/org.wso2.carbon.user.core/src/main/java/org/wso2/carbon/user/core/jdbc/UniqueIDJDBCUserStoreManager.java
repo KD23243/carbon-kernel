@@ -1,7 +1,7 @@
 /*
- * Copyright (c) 2019, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ * Copyright (c) 2019-2024, WSO2 LLC. (http://www.wso2.com).
  *
- * WSO2 Inc. licenses this file to you under the Apache License,
+ * WSO2 LLC. licenses this file to you under the Apache License,
  * Version 2.0 (the "License"); you may not use this file except
  * in compliance with the License.
  * You may obtain a copy of the License at
@@ -11,7 +11,7 @@
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied. See the License for the
+ * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
  */
@@ -19,10 +19,13 @@
 package org.wso2.carbon.user.core.jdbc;
 
 import org.apache.axiom.om.util.Base64;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.CarbonConstants;
+import org.wso2.carbon.base.ServerConfiguration;
 import org.wso2.carbon.context.CarbonContext;
 import org.wso2.carbon.user.api.Property;
 import org.wso2.carbon.user.api.RealmConfiguration;
@@ -30,11 +33,14 @@ import org.wso2.carbon.user.core.NotImplementedException;
 import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserRealm;
 import org.wso2.carbon.user.core.UserStoreClientException;
+import org.wso2.carbon.user.core.UserStoreConfigConstants;
 import org.wso2.carbon.user.core.UserStoreException;
 import org.wso2.carbon.user.core.UserStoreManager;
 import org.wso2.carbon.user.core.claim.ClaimManager;
+import org.wso2.carbon.user.core.common.AbstractUserStoreManager;
 import org.wso2.carbon.user.core.common.AuthenticationResult;
 import org.wso2.carbon.user.core.common.FailureReason;
+import org.wso2.carbon.user.core.common.Group;
 import org.wso2.carbon.user.core.common.LoginIdentifier;
 import org.wso2.carbon.user.core.common.PaginatedSearchResult;
 import org.wso2.carbon.user.core.common.RoleBreakdown;
@@ -55,7 +61,6 @@ import org.wso2.carbon.utils.Secret;
 import org.wso2.carbon.utils.UnsupportedSecretTypeException;
 import org.wso2.carbon.utils.dbcreator.DatabaseCreator;
 
-import javax.sql.DataSource;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.sql.Connection;
@@ -65,8 +70,15 @@ import java.sql.SQLException;
 import java.sql.SQLIntegrityConstraintViolationException;
 import java.sql.SQLTimeoutException;
 import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
@@ -77,10 +89,23 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TimeZone;
+import javax.sql.DataSource;
 
+import static java.time.ZoneOffset.UTC;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_CREATED_DATE_ATTRIBUTE;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_ID_ATTRIBUTE;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_LAST_MODIFIED_DATE_ATTRIBUTE;
+import static org.wso2.carbon.user.core.constants.UserCoreDBConstants.SQL_STATEMENT_PARAMETER_PLACEHOLDER;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_ADDING_A_USER;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_ADDING_ROLE;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_WRITING_TO_DATABASE;
+import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_EMPTY_GROUP_ID;
+import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_EMPTY_GROUP_NAME;
+import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_NO_GROUP_FOUND_WITH_ID;
+import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_SORTING_NOT_SUPPORTED;
+import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_UNSUPPORTED_DATE_SEARCH_FILTER;
+import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER;
 import static org.wso2.carbon.user.core.util.DatabaseUtil.getLoggableSqlString;
 
 import static java.lang.Math.max;
@@ -91,8 +116,9 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
     private static final String QUERY_FILTER_STRING_ANY = "*";
     private static final String SQL_FILTER_STRING_ANY = "%";
+    private static final String SQL_FILTER_CHAR_ESCAPE = "\\";
     private static final String CASE_INSENSITIVE_USERNAME = "CaseInsensitiveUsername";
-    private static final String SHA_1_PRNG = "SHA1PRNG";
+    private static final String RANDOM_ALG_DRBG = "DRBG";
     private static final String DB2 = "db2";
     private static final String H2 = "h2";
     private static final String MSSQL = "mssql";
@@ -106,6 +132,7 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
     private static final String VALIDATION_INTERVAL = "validationInterval";
     private static final List<Property> UNIQUE_ID_JDBC_UM_ADVANCED_PROPERTIES = new ArrayList<>();
     private static final String UID = "uid";
+    private static final Calendar calendar = Calendar.getInstance(TimeZone.getTimeZone(UTC));
 
     public UniqueIDJDBCUserStoreManager() {
 
@@ -180,7 +207,6 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
             if (filter != null && filter.trim().length() != 0) {
                 filter = filter.trim();
                 filter = filter.replace("*", "%");
-                filter = filter.replace("?", "_");
             } else {
                 filter = "%";
             }
@@ -193,17 +219,27 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 throw new UserStoreException("Attempts to establish a connection with the data source has failed.");
             }
 
-            if (isCaseSensitiveUsername()) {
-                sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USER_FILTER_WITH_ID);
+            if (filter.contains("_")) {
+                filter = filter.replaceAll("_", "\\\\_");
+                sqlStmt = getUserFilterQuery(JDBCRealmConstants.GET_USER_FILTER_WITH_ID_WITH_ESCAPE,
+                        JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_CASE_INSENSITIVE_WITH_ESCAPE);
             } else {
-                sqlStmt = realmConfig
-                        .getUserStoreProperty(JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_CASE_INSENSITIVE);
+                sqlStmt = getUserFilterQuery(JDBCRealmConstants.GET_USER_FILTER_WITH_ID,
+                        JDBCCaseInsensitiveConstants.GET_USER_FILTER_WITH_ID_CASE_INSENSITIVE);
             }
 
+            filter = filter.replace("?", "_");
             prepStmt = dbConnection.prepareStatement(sqlStmt);
             prepStmt.setString(1, filter);
-            if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
-                prepStmt.setInt(2, tenantId);
+            if (sqlStmt.toUpperCase().contains(UserCoreConstants.SQL_ESCAPE_KEYWORD)) {
+                prepStmt.setString(2, SQL_FILTER_CHAR_ESCAPE);
+                if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                    prepStmt.setInt(3, tenantId);
+                }
+            } else {
+                if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                    prepStmt.setInt(2, tenantId);
+                }
             }
 
             prepStmt.setMaxRows(maxItemLimit);
@@ -280,6 +316,14 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
     }
 
+    private String getUserFilterQuery(String caseSensitiveQueryPropertyName, String caseInsensitiveQueryPropertyName) {
+
+        if (isCaseSensitiveUsername()) {
+            return realmConfig.getUserStoreProperty(caseSensitiveQueryPropertyName);
+        }
+        return realmConfig.getUserStoreProperty(caseInsensitiveQueryPropertyName);
+    }
+
     @Override
     public boolean doCheckIsUserInRoleWithID(String userID, String roleName) throws UserStoreException {
 
@@ -311,6 +355,20 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
         RoleContext roleContext = createRoleContext(roleName);
         return getUserListOfJDBCRoleWithID(roleContext, filter);
+    }
+
+    @Override
+    public int doGetUserCountOfRole(String roleName) throws UserStoreException {
+
+        throw new UserStoreException("Operation is not supported.");
+    }
+
+    @Override
+    public int doGetUserCountOfRoleWithID(String roleName)
+            throws UserStoreException {
+
+        RoleContext roleContext = createRoleContext(roleName);
+        return getUserCountByRole(roleContext);
     }
 
     public List<User> getUserListOfJDBCRoleWithID(RoleContext ctx, String filter) throws UserStoreException {
@@ -377,6 +435,72 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
             users = getUsersFromDatabaseWithConstraints(this, sqlStmt, maxItemLimit, queryTimeout, filter, roleName);
         }
         return users;
+    }
+
+    /**
+     * Return the count of users belong to the given role for the given {@link RoleContext}.
+     *
+     * @param ctx {@link RoleContext} corresponding to the role.
+     * @throws UserStoreException If an unexpected error occurs while accessing user store.
+     */
+    public int getUserCountByRole(RoleContext ctx) throws UserStoreException {
+
+        String roleName = ctx.getRoleName();
+        String roleId = getRoleIdByName(ctx.getRoleName(), tenantId);
+        Connection dbConnection = null;
+        PreparedStatement prepStmt = null;
+        ResultSet rs = null;
+        int count = 0;
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_COUNT_WITH_FILTER_ROLE_WITH_ID);
+        try {
+            dbConnection = getDBConnection();
+            prepStmt = dbConnection.prepareStatement(sqlStmt);
+            prepStmt.setString(1, roleId);
+            prepStmt.setInt(2, tenantId);
+            rs = prepStmt.executeQuery();
+            while (rs.next()) {
+                count = rs.getInt(1);
+            }
+            return count;
+        } catch (SQLException e) {
+            String errorMessage =
+                    "Error occurred while getting the count of users in the role : " + roleName;
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            throw new UserStoreException(errorMessage, e);
+        } finally {
+            DatabaseUtil.closeAllConnections(dbConnection, rs, prepStmt);
+        }
+    }
+
+    private String getRoleIdByName(String roleName, int tenantId) throws UserStoreException {
+
+        String roleID = null;
+        Connection dbConnection = null;
+        PreparedStatement prepStmt = null;
+        ResultSet rs = null;
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_ROLE_ID_BY_NAME);
+        try {
+            dbConnection = getDBConnection();
+            prepStmt = dbConnection.prepareStatement(sqlStmt);
+            prepStmt.setString(1, roleName);
+            prepStmt.setInt(2, tenantId);
+            rs = prepStmt.executeQuery();
+            while (rs.next()) {
+                roleID = rs.getString(1);
+            }
+            return roleID;
+        } catch (SQLException e) {
+            String errorMessage =
+                    "Error occurred while getting the role id for the role : " + roleName;
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            throw new UserStoreException(errorMessage, e);
+        } finally {
+            DatabaseUtil.closeAllConnections(dbConnection, rs, prepStmt);
+        }
     }
 
     @Override
@@ -713,7 +837,7 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 Timestamp changedTime = rs.getTimestamp(6);
 
                 GregorianCalendar gc = new GregorianCalendar();
-                gc.add(GregorianCalendar.HOUR, -24);
+                gc.add(GregorianCalendar.HOUR, - AbstractUserStoreManager.pwValidityTimeoutInt);
                 Date date = gc.getTime();
 
                 if (requireChange && changedTime.before(date)) {
@@ -823,7 +947,11 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
             prepStmt = dbConnection.prepareStatement(sqlstmt);
             prepStmt.setString(1, preferredUserNameProperty);
-            prepStmt.setString(2, preferredUserNameValue);
+            if (isStoreUserAttributeAsUnicode()) {
+                prepStmt.setNString(2, preferredUserNameValue);
+            } else {
+                prepStmt.setString(2, preferredUserNameValue);
+            }
             prepStmt.setString(3, profileName);
             if (sqlstmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
                 prepStmt.setInt(4, tenantId);
@@ -858,7 +986,7 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 Timestamp changedTime = rs.getTimestamp(6);
 
                 GregorianCalendar gc = new GregorianCalendar();
-                gc.add(GregorianCalendar.HOUR, -24);
+                gc.add(GregorianCalendar.HOUR, - AbstractUserStoreManager.pwValidityTimeoutInt);
                 Date date = gc.getTime();
 
                 if (requireChange && changedTime.before(date)) {
@@ -946,7 +1074,7 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 Timestamp changedTime = rs.getTimestamp(6);
 
                 GregorianCalendar gc = new GregorianCalendar();
-                gc.add(GregorianCalendar.HOUR, -24);
+                gc.add(GregorianCalendar.HOUR, - AbstractUserStoreManager.pwValidityTimeoutInt);
                 Date date = gc.getTime();
 
                 if (requireChange && changedTime.before(date)) {
@@ -1052,7 +1180,7 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 Timestamp changedTime = rs.getTimestamp(6);
 
                 GregorianCalendar gc = new GregorianCalendar();
-                gc.add(GregorianCalendar.HOUR, -24);
+                gc.add(GregorianCalendar.HOUR, - AbstractUserStoreManager.pwValidityTimeoutInt);
                 Date date = gc.getTime();
 
                 if (requireChange && changedTime.before(date)) {
@@ -1573,6 +1701,8 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 log.debug(msg, e);
             }
             throw new UserStoreException(msg, e);
+        } catch (UserStoreException e) {
+            throw e;
         } catch (Exception e) {
             String errorMessage = "Error occurred while getting database type from DB connection";
             if (log.isDebugEnabled()) {
@@ -2095,7 +2225,7 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 if (requireChange) {
                     GregorianCalendar gc = new GregorianCalendar();
                     gc.setTime(changedTime);
-                    gc.add(GregorianCalendar.HOUR, 24);
+                    gc.add(GregorianCalendar.HOUR, AbstractUserStoreManager.pwValidityTimeoutInt);
                     date = gc.getTime();
                 }
             }
@@ -2120,13 +2250,13 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
         String saltValue;
         try {
-            SecureRandom secureRandom = SecureRandom.getInstance(SHA_1_PRNG);
+            SecureRandom secureRandom = SecureRandom.getInstance(RANDOM_ALG_DRBG);
             byte[] bytes = new byte[16];
             //secureRandom is automatically seeded by calling nextBytes
             secureRandom.nextBytes(bytes);
             saltValue = Base64.encode(bytes);
         } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("SHA1PRNG algorithm could not be found.");
+            throw new RuntimeException("DRBG algorithm could not be found.");
         }
         return saltValue;
     }
@@ -2148,7 +2278,11 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                     if (param == null) {
                         throw new UserStoreException("Invalid data provided");
                     } else if (param instanceof String) {
-                        prepStmt.setString(i + 1, (String) param);
+                        if (isStoreUserAttributeAsUnicode()) {
+                            prepStmt.setNString(i + 1, (String) param);
+                        } else {
+                            prepStmt.setString(i + 1, (String) param);
+                        }
                     } else if (param instanceof Integer) {
                         prepStmt.setInt(i + 1, (Integer) param);
                     } else if (param instanceof Date) {
@@ -2185,6 +2319,75 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 // Other SQL Exception
                 throw new UserStoreException(msg, e);
             }
+        } finally {
+            if (localConnection) {
+                DatabaseUtil.closeAllConnections(dbConnection);
+            }
+            DatabaseUtil.closeAllConnections(null, prepStmt);
+        }
+    }
+
+    private void updateValuesToDatabaseWithUTCTime(Connection dbConnection, String sqlStmt, Object... params)
+            throws UserStoreException {
+
+        PreparedStatement prepStmt = null;
+        boolean localConnection = false;
+        try {
+            Instant currentInstant = Instant.now();
+            if (dbConnection == null) {
+                localConnection = true;
+                dbConnection = getDBConnection();
+            }
+            prepStmt = dbConnection.prepareStatement(sqlStmt);
+            if (params != null && params.length > 0) {
+                for (int i = 0; i < params.length; i++) {
+                    Object param = params[i];
+                    if (param == null) {
+                        throw new UserStoreException("Invalid data provided");
+                    } else if (param instanceof String) {
+                        if (isStoreUserAttributeAsUnicode()) {
+                            prepStmt.setNString(i + 1, (String) param);
+                        } else {
+                            prepStmt.setString(i + 1, (String) param);
+                        }
+                    } else if (param instanceof Integer) {
+                        prepStmt.setInt(i + 1, (Integer) param);
+                    } else if (param instanceof Date) {
+                        // Convert the current date-time to UTC time with ISO Date time format.
+                        OffsetDateTime offsetDateTime = currentInstant.atOffset(ZoneOffset.UTC);
+                        LocalDateTime localDateTime = offsetDateTime.toLocalDateTime();
+                        int nanoSeconds = localDateTime.getNano();
+                        int roundedNanoSeconds = (nanoSeconds / 1000000) * 1000000;
+                        LocalDateTime formattedDateTime = localDateTime.withNano(roundedNanoSeconds);
+                        prepStmt.setTimestamp(i + 1, Timestamp.valueOf(formattedDateTime));
+                    } else if (param instanceof Boolean) {
+                        prepStmt.setBoolean(i + 1, (Boolean) param);
+                    }
+                }
+            }
+            int count = prepStmt.executeUpdate();
+            if (log.isDebugEnabled()) {
+                if (count == 0) {
+                    log.debug("No rows were updated");
+                }
+                log.debug("Executed query is " + sqlStmt + " and number of updated rows :: " + count);
+            }
+
+            if (localConnection) {
+                dbConnection.commit();
+            }
+        } catch (SQLException e) {
+            DatabaseUtil.rollBack(dbConnection);
+            String msg = "Error occurred while updating string values to database.";
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            if (e instanceof SQLIntegrityConstraintViolationException) {
+                // Duplicate entry
+                throw new UserStoreException(msg, ERROR_CODE_DUPLICATE_WHILE_WRITING_TO_DATABASE.getCode(), e);
+            }
+            // Other SQL Exception
+            throw new UserStoreException(msg, e);
         } finally {
             if (localConnection) {
                 DatabaseUtil.closeAllConnections(dbConnection);
@@ -2326,6 +2529,17 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
         if (value == null) {
             throw new IllegalArgumentException("Filter value cannot be null");
         }
+        boolean uidIsUsername = false;
+        try {
+            String usernameMappedAttribute = claimManager.getClaimMapping(USERNAME_CLAIM_URI).getMappedAttribute();
+            uidIsUsername = usernameMappedAttribute.equals(UID);
+        } catch (org.wso2.carbon.user.api.UserStoreException e) {
+            throw new UserStoreException("Error occurred while retrieving claim mapping.", e);
+        }
+
+        boolean isOptimizedSearchEnabled = Boolean.parseBoolean(ServerConfiguration.getInstance()
+                .getFirstProperty(JDBCRealmConstants.PROP_ENABLE_OPTIMIZED_JDBC_SEARCH));
+        boolean useOptimizedProcess = isOptimizedSearchEnabled && UID.equals(property) && uidIsUsername;
 
         String sqlStmt;
         if (value.contains(QUERY_FILTER_STRING_ANY)) {
@@ -2334,18 +2548,36 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 // Convert all the * to % except \*.
                 value = value.replaceAll("(?<!\\\\)\\*", SQL_FILTER_STRING_ANY);
             }
-            if (!isCaseSensitiveUsername() && UID.equals(property)) {
-                sqlStmt = realmConfig.getUserStoreProperty(JDBCCaseInsensitiveConstants.
-                        GET_USERS_FOR_PROP_WITH_ID_CASE_INSENSITIVE);
+            if (useOptimizedProcess) {
+                if (!isCaseSensitiveUsername()) {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCCaseInsensitiveConstants.
+                            GET_USERS_FOR_USERNAME_WITH_USERNAME_CASE_INSENSITIVE);
+                } else {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_FOR_USERNAME);
+                }
             } else {
-                sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_FOR_PROP_WITH_ID);
+                if ((!isCaseSensitiveUsername() && UID.equals(property)) || isCaseInsensitiveProperty(property)) {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCCaseInsensitiveConstants.
+                            GET_USERS_FOR_PROP_WITH_ID_CASE_INSENSITIVE);
+                } else {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_FOR_PROP_WITH_ID);
+                }
             }
         } else {
-            if (!isCaseSensitiveUsername() && UID.equals(property)) {
-                sqlStmt = realmConfig.getUserStoreProperty(JDBCCaseInsensitiveConstants.
-                        GET_USERS_FOR_CLAIM_VALUE_WITH_ID_CASE_INSENSITIVE);
+            if (useOptimizedProcess) {
+                if (!isCaseSensitiveUsername()) {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCCaseInsensitiveConstants
+                            .GET_USER_FOR_USERNAME_WITH_USERNAME_CASE_INSENSITIVE);
+                } else {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USER_FOR_USERNAME);
+                }
             } else {
-                sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_FOR_CLAIM_VALUE_WITH_ID);
+                if ((!isCaseSensitiveUsername() && UID.equals(property)) || isCaseInsensitiveProperty(property)) {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCCaseInsensitiveConstants.
+                            GET_USERS_FOR_CLAIM_VALUE_WITH_ID_CASE_INSENSITIVE);
+                } else {
+                    sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_FOR_CLAIM_VALUE_WITH_ID);
+                }
             }
         }
 
@@ -2356,14 +2588,22 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
         try {
             dbConnection = getDBConnection();
             prepStmt = dbConnection.prepareStatement(sqlStmt);
-            prepStmt.setString(1, property);
-            prepStmt.setString(2, value);
-            prepStmt.setString(3, profileName);
-            if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
-                prepStmt.setInt(4, tenantId);
-                prepStmt.setInt(5, tenantId);
+            if (useOptimizedProcess) {
+                prepStmt.setString(1, value);
+                prepStmt.setInt(2, tenantId);
+            } else {
+                prepStmt.setString(1, property);
+                if (isStoreUserAttributeAsUnicode()) {
+                    prepStmt.setNString(2, value);
+                } else {
+                    prepStmt.setString(2, value);
+                }
+                prepStmt.setString(3, profileName);
+                if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                    prepStmt.setInt(4, tenantId);
+                    prepStmt.setInt(5, tenantId);
+                }
             }
-
             int searchTime;
             int maxItemLimit;
             try {
@@ -2478,24 +2718,20 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
         Map<String, Map<String, String>> usersPropertyValuesMap = new HashMap<>();
         try {
             dbConnection = getDBConnection();
-            StringBuilder usernameParameter = new StringBuilder();
 
             sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_PROPS_FOR_PROFILE_WITH_ID);
-            for (int i = 0; i < users.size(); i++) {
-
-                usernameParameter.append("'").append(users.get(i)).append("'");
-
-                if (i != users.size() - 1) {
-                    usernameParameter.append(",");
-                }
-            }
-
-            sqlStmt = sqlStmt.replaceFirst("\\?", usernameParameter.toString());
+            sqlStmt = sqlStmt.replaceFirst("\\?", DatabaseUtil.buildDynamicParameterString(
+                    SQL_STATEMENT_PARAMETER_PLACEHOLDER, users.size()));
             prepStmt = dbConnection.prepareStatement(sqlStmt);
-            prepStmt.setString(1, profileName);
+
+            int index = 1;
+            for (String user : users) {
+                prepStmt.setString(index++, user);
+            }
+            prepStmt.setString(index++, profileName);
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
-                prepStmt.setInt(2, tenantId);
-                prepStmt.setInt(3, tenantId);
+                prepStmt.setInt(index++, tenantId);
+                prepStmt.setInt(index, tenantId);
             }
 
             rs = prepStmt.executeQuery();
@@ -2549,26 +2785,23 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
         try {
             dbConnection = getDBConnection();
-            StringBuilder usernameParameter = new StringBuilder();
             sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_USERS_ROLE_WITH_ID);
             if (sqlStmt == null) {
                 throw new UserStoreException("The sql statement for retrieving users roles is null.");
             }
-            for (int i = 0; i < userIDs.size(); i++) {
 
-                usernameParameter.append("'").append(userIDs.get(i)).append("'");
-
-                if (i != userIDs.size() - 1) {
-                    usernameParameter.append(",");
-                }
-            }
-
-            sqlStmt = sqlStmt.replaceFirst("\\?", usernameParameter.toString());
+            sqlStmt = sqlStmt.replaceFirst("\\?", DatabaseUtil.buildDynamicParameterString(
+                    SQL_STATEMENT_PARAMETER_PLACEHOLDER, userIDs.size()));
             prepStmt = dbConnection.prepareStatement(sqlStmt);
+
+            int index = 1;
+            for (String userID : userIDs) {
+                prepStmt.setString(index++, userID);
+            }
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
-                prepStmt.setInt(1, tenantId);
-                prepStmt.setInt(2, tenantId);
-                prepStmt.setInt(3, tenantId);
+                prepStmt.setInt(index++, tenantId);
+                prepStmt.setInt(index++, tenantId);
+                prepStmt.setInt(index, tenantId);
             }
             rs = prepStmt.executeQuery();
             String domainName = getMyDomainName();
@@ -2809,6 +3042,12 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 }
             }
 
+            // Select and update lock the rows to be updated in a particular order before the actual update operation to
+            // prevent the deadlock scenario in issue https://github.com/wso2-enterprise/asgardeo-product/issues/21031.
+            // Currently, this issue is only reproduced in SQL Server.
+            if (isMSSQLDB(dbConnection)) {
+                selectRowsForUpdate(dbConnection, userID);
+            }
             int[] counts = prepStmt.executeBatch();
             if (log.isDebugEnabled()) {
                 int totalUpdated = 0;
@@ -2852,7 +3091,11 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                     if (param == null) {
                         throw new UserStoreException("Invalid data provided");
                     } else if (param instanceof String) {
-                        prepStmt.setString(i + 1, (String) param);
+                        if (isStoreUserAttributeAsUnicode()) {
+                            prepStmt.setNString(i + 1, (String) param);
+                        } else {
+                            prepStmt.setString(i + 1, (String) param);
+                        }
                     } else if (param instanceof Integer) {
                         prepStmt.setInt(i + 1, (Integer) param);
                     } else if (param instanceof Date) {
@@ -2876,6 +3119,18 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
         String isUsernameCaseInsensitiveString = realmConfig.getUserStoreProperty(CASE_INSENSITIVE_USERNAME);
         return !Boolean.parseBoolean(isUsernameCaseInsensitiveString);
+    }
+
+    private boolean isCaseInsensitiveProperty(String property) {
+
+        String caseInsensitiveAttributesProperty = realmConfig.getUserStoreProperty(
+                UserStoreConfigConstants.CASE_INSENSITIVE_ATTRIBUTES);
+        if (StringUtils.isBlank(caseInsensitiveAttributesProperty)) {
+            return false;
+        }
+        String[] caseInsensitiveAttributes = Arrays.stream(caseInsensitiveAttributesProperty.split(","))
+                .map(String::trim).toArray(String[]::new);
+        return ArrayUtils.contains(caseInsensitiveAttributes, property);
     }
 
     @Override
@@ -3160,7 +3415,11 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
             }
             prepStmt = dbConnection.prepareStatement(sqlStmt);
             prepStmt.setString(1, property);
-            prepStmt.setString(2, value);
+            if (isStoreUserAttributeAsUnicode()) {
+                prepStmt.setNString(2, value);
+            } else {
+                prepStmt.setString(2, value);
+            }
             prepStmt.setString(3, profileName);
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
                 prepStmt.setInt(4, tenantId);
@@ -3229,7 +3488,11 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
             sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_PAGINATED_USERS_COUNT_FOR_PROP_WITH_ID);
             prepStmt = dbConnection.prepareStatement(sqlStmt);
             prepStmt.setString(1, property);
-            prepStmt.setString(2, value);
+            if (isStoreUserAttributeAsUnicode()) {
+                prepStmt.setNString(2, value);
+            } else {
+                prepStmt.setString(2, value);
+            }
             prepStmt.setString(3, profileName);
             if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
                 prepStmt.setInt(4, tenantId);
@@ -3400,6 +3663,444 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
         return result;
     }
 
+    @Override
+    public String doGetGroupIdFromGroupName(String groupName) throws UserStoreException {
+
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_GROUP_ID_FROM_GROUP_NAME);
+
+        try (Connection dbConnection = getDBConnection();
+             PreparedStatement prepStmt = dbConnection.prepareStatement(sqlStmt)) {
+            prepStmt.setString(1, groupName);
+            if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                prepStmt.setInt(2, tenantId);
+            }
+            try (ResultSet resultSet =  prepStmt.executeQuery()) {
+                if (resultSet.next()) {
+                    return resultSet.getString(1);
+                }
+                return null;
+            }
+        } catch (SQLException e) {
+            String msg = "Error occurred while retrieving group id for group : " + groupName;
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            throw new UserStoreException(msg, e);
+        }
+    }
+
+    @Override
+    public String doGetGroupNameFromGroupId(String groupId) throws UserStoreException {
+
+        String groupName = "";
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_GROUP_NAME_FROM_GROUP_ID);
+
+        try (Connection dbConnection = getDBConnection();
+             PreparedStatement prepStmt = dbConnection.prepareStatement(sqlStmt)) {
+            prepStmt.setString(1, groupId);
+            if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                prepStmt.setInt(2, tenantId);
+            }
+            try (ResultSet resultSet =  prepStmt.executeQuery()) {
+                if (resultSet.next()) {
+                    groupName = resultSet.getString(1);
+                }
+            }
+        } catch (SQLException e) {
+            String msg = "Error occurred while retrieving group name for group with ID: " + groupId;
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            throw new UserStoreException(msg, e);
+        }
+        if (StringUtils.isBlank(groupName)) {
+            if (log.isDebugEnabled()) {
+                log.error(String.format("No group found with id: %s in userstore: %s in tenant: %s", groupId,
+                        getMyDomainName(), tenantId));
+            }
+            return null;
+        }
+        return UserCoreUtil.addDomainToName(groupName, getMyDomainName());
+    }
+
+    @Override
+    public Group doGetGroupFromGroupName(String groupName, List<String> requiredAttributes)
+            throws UserStoreException {
+
+        Group group = new Group();
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_GROUP_FROM_GROUP_NAME);
+        String groupId = "";
+        String createdTime = "";
+        String lastModified = "";
+
+        try (Connection dbConnection = getDBConnection();
+             PreparedStatement prepStmt = dbConnection.prepareStatement(sqlStmt)) {
+            prepStmt.setString(1, groupName);
+            if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                prepStmt.setInt(2, tenantId);
+            }
+            try (ResultSet resultSet =  prepStmt.executeQuery()) {
+                if (resultSet.next()) {
+                    groupId = resultSet.getString(1);
+                    LocalDateTime createdLocalDateTime = LocalDateTime.parse(resultSet.getTimestamp(2)
+                            .toString().replace(' ', 'T'));
+                    createdTime = createdLocalDateTime.format(DateTimeFormatter.ISO_DATE_TIME);
+                    LocalDateTime lastModifiedLocalDateTime = LocalDateTime.parse(resultSet.getTimestamp(3)
+                            .toString().replace(' ', 'T'));
+                    lastModified = lastModifiedLocalDateTime.format(DateTimeFormatter.ISO_DATE_TIME);
+                }
+            }
+        } catch (SQLException e) {
+            String msg = "Error occurred while retrieving group id for group : " + groupName;
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            throw new UserStoreException(msg, e);
+        }
+        if (StringUtils.isBlank(groupId)) {
+            if (log.isDebugEnabled()) {
+                log.error(String.format("No group found with id: %s in userstore: %s in tenant: %s", groupId,
+                        getMyDomainName(), tenantId));
+            }
+            return null;
+        }
+        String groupNameWithDomain = UserCoreUtil.addDomainToName(groupName, getMyDomainName());
+        group.setGroupName(groupNameWithDomain);
+        group.setGroupID(groupId);
+        group.setUserStoreDomain(getMyDomainName());
+        group.setTenantDomain(getTenantDomain(tenantId));
+        group.setCreatedDate(createdTime);
+        group.setLastModifiedDate(lastModified);
+        return group;
+    }
+
+    @Override
+    public Group doGetGroupFromGroupId(String groupId, List<String> requiredAttributes)
+            throws UserStoreException {
+
+        Group group = new Group();
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_GROUP_FROM_GROUP_ID);
+        String groupName = "";
+        String createdTime = "";
+        String lastModified = "";
+
+        try (Connection dbConnection = getDBConnection();
+             PreparedStatement prepStmt = dbConnection.prepareStatement(sqlStmt)) {
+            prepStmt.setString(1, groupId);
+            if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                prepStmt.setInt(2, tenantId);
+            }
+            try (ResultSet resultSet =  prepStmt.executeQuery()) {
+                if (resultSet.next()) {
+                    groupName = resultSet.getString(1);
+                    LocalDateTime createdLocalDateTime = LocalDateTime.parse(resultSet.getTimestamp(2)
+                            .toString().replace(' ', 'T'));
+                    createdTime = createdLocalDateTime.format(DateTimeFormatter.ISO_DATE_TIME);
+                    LocalDateTime lastModifiedLocalDateTime = LocalDateTime.parse(resultSet.getTimestamp(3)
+                            .toString().replace(' ', 'T'));
+                    lastModified = lastModifiedLocalDateTime.format(DateTimeFormatter.ISO_DATE_TIME);
+                }
+            }
+        } catch (SQLException e) {
+            String msg = "Error occurred while retrieving group id for group : " + groupName;
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            throw new UserStoreException(msg, e);
+        }
+        if (StringUtils.isBlank(groupName)) {
+            if (log.isDebugEnabled()) {
+                log.error(String.format("No group found with name: %s in userstore: %s in tenant: %s", groupName,
+                        getMyDomainName(), tenantId));
+            }
+            return null;
+        }
+        String groupNameWithDomain = UserCoreUtil.addDomainToName(groupName, getMyDomainName());
+        group.setGroupName(groupNameWithDomain);
+        group.setGroupID(groupId);
+        group.setUserStoreDomain(getMyDomainName());
+        group.setTenantDomain(getTenantDomain(tenantId));
+        group.setCreatedDate(createdTime);
+        group.setLastModifiedDate(lastModified);
+        return group;
+    }
+
+    @Override
+    public List<Group> doGetGroupListOfUser(String userId, int limit, int offset, String sortBy, String sortOrder)
+            throws UserStoreException {
+
+        List<String> groupNames;
+        List<Group> groupList = new ArrayList<>();
+        groupNames = Arrays.asList(doGetExternalRoleListOfUserWithID(userId, "*"));
+        groupNames = paginateGroupsList(offset, limit, groupNames);
+        if (CollectionUtils.isNotEmpty(groupNames)) {
+            for (String groupName : groupNames) {
+                Group group = doGetGroupFromGroupName(groupName, null);
+                groupList.add(group);
+            }
+        }
+        return groupList;
+    }
+
+    @Override
+    public List<Group> doListGroups(Condition condition, int limit, int offset, String sortBy, String sortOrder)
+            throws UserStoreException {
+
+        List<ExpressionCondition> expressionConditions = new ArrayList<>();
+        getExpressionConditions(condition, expressionConditions);
+
+        // Multi attribute filtering is not supported for groups listing.
+        if (expressionConditions.size() > 1) {
+            throw new UserStoreClientException(
+                    String.format(ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getMessage(), "Multi attribute filtering not " +
+                            "supported for group listing"), ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getCode());
+        }
+        if (StringUtils.isNotBlank(sortBy) && StringUtils.isNotBlank(sortOrder)) {
+            throw new UserStoreClientException(ERROR_SORTING_NOT_SUPPORTED.getMessage(),
+                    ERROR_SORTING_NOT_SUPPORTED.getCode());
+        }
+
+        List<Group> filteredGroups = new ArrayList<>();
+        ExpressionCondition expressionCondition = expressionConditions.get(0);
+        validateExpressionConditionForGroup(expressionCondition);
+        String attributeName = expressionCondition.getAttributeName();
+        String attributeValueForSQL = buildSearchAttributeValue(expressionCondition.getOperation(),
+                expressionCondition.getAttributeValue(), SQL_FILTER_STRING_ANY);
+
+        String sqlStmt = null;
+        Timestamp timestampValueForSQL = null;
+        switch (attributeName) {
+            case GROUP_ID_ATTRIBUTE:
+                sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_GROUP_FILTER_WITH_GROUP_ID);
+                break;
+            case GROUP_CREATED_DATE_ATTRIBUTE:
+                sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_GROUP_FILTER_WITH_CREATED_DATE);
+                timestampValueForSQL = getTimeStampFromString(attributeValueForSQL);
+                break;
+            case GROUP_LAST_MODIFIED_DATE_ATTRIBUTE:
+                sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.GET_GROUP_FILTER_WITH_LAST_MODIFIED);
+                timestampValueForSQL = getTimeStampFromString(attributeValueForSQL);
+                break;
+            default:
+                throw new UserStoreClientException(String.format(ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getMessage(),
+                        "Unsupported attribute name: " + attributeName),
+                        ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getCode());
+        }
+
+        try (Connection dbConnection = getDBConnection();
+             PreparedStatement prepStmt = dbConnection.prepareStatement(sqlStmt)) {
+            String dbType = DatabaseCreator.getDatabaseType(dbConnection);
+            if (StringUtils.equals(GROUP_CREATED_DATE_ATTRIBUTE, attributeName) ||
+                    StringUtils.equals(GROUP_LAST_MODIFIED_DATE_ATTRIBUTE, attributeName)) {
+                if (MSSQL.equalsIgnoreCase(dbType)) {
+                    prepStmt.setString(1, attributeValueForSQL);
+                } else {
+                    prepStmt.setTimestamp(1, timestampValueForSQL);
+                }
+            } else {
+                prepStmt.setString(1, attributeValueForSQL);
+            }
+
+            if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                prepStmt.setInt(2, tenantId);
+            }
+
+            try (ResultSet resultSet = prepStmt.executeQuery()) {
+                while (resultSet.next()) {
+                    Group group = new Group();
+                    String groupName = resultSet.getString(1);
+                    String groupId = resultSet.getString(2);
+                    LocalDateTime createdLocalDateTime = LocalDateTime.parse(resultSet.getTimestamp(3)
+                            .toString().replace(' ', 'T'));
+                    String createdTime = createdLocalDateTime.format(DateTimeFormatter.ISO_DATE_TIME);
+                    LocalDateTime lastModifiedLocalDateTime = LocalDateTime.parse(resultSet.getTimestamp(4)
+                            .toString().replace(' ', 'T'));
+                    String lastModified = lastModifiedLocalDateTime.format(DateTimeFormatter.ISO_DATE_TIME);
+                    group.setGroupName(UserCoreUtil.addDomainToName(groupName, getMyDomainName()));
+                    group.setGroupID(groupId);
+                    group.setUserStoreDomain(getMyDomainName());
+                    group.setTenantDomain(getTenantDomain(tenantId));
+                    group.setCreatedDate(createdTime);
+                    group.setLastModifiedDate(lastModified);
+                    filteredGroups.add(group);
+                }
+            }
+        } catch (Exception e) {
+            String msg = "Error occurred while getting the group list in tenant: " + tenantId;
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            throw new UserStoreException(msg, e);
+        }
+        return filteredGroups;
+    }
+
+    @Override
+    public Group doAddGroup(String groupName, String groupId, List<String> userIds, Map<String, String> claims)
+            throws UserStoreException {
+
+        persistGroup(groupName, groupId, userIds);
+        return getGroupByGroupName(groupName, null);
+    }
+
+    protected void persistGroup(String groupName, String groupId, List<String> userIds) throws UserStoreException {
+
+        try (Connection dbConnection = getDBConnection()) {
+            try {
+                String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.ADD_GROUP);
+                if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                    this.updateValuesToDatabaseWithUTCTime(dbConnection, sqlStmt, groupId, groupName, tenantId,
+                            new Date(), new Date());
+                } else {
+                    this.updateValuesToDatabaseWithUTCTime(dbConnection, sqlStmt, groupId, groupName, new Date(),
+                            new Date());
+                }
+
+                if (userIds != null) {
+                    String[] userIdList = userIds.toArray(new String[0]);
+                    // Add group to the users.
+                    String type = DatabaseCreator.getDatabaseType(dbConnection);
+                    String sqlStmt2 =
+                            realmConfig.getUserStoreProperty(JDBCRealmConstants.ADD_USER_TO_ROLE_WITH_ID + "-" + type);
+
+                    if (StringUtils.isBlank(sqlStmt2)) {
+                        sqlStmt2 = realmConfig.getUserStoreProperty(JDBCRealmConstants.ADD_USER_TO_ROLE_WITH_ID);
+                    }
+                    if (sqlStmt2.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                        if (UserCoreConstants.OPENEDGE_TYPE.equals(type)) {
+                            DatabaseUtil.udpateUserRoleMappingInBatchMode(dbConnection, sqlStmt2, tenantId, userIdList,
+                                    tenantId, groupName, tenantId);
+                        } else {
+                            DatabaseUtil.udpateUserRoleMappingInBatchMode(dbConnection, sqlStmt2, userIdList, tenantId,
+                                    groupName, tenantId, tenantId);
+                        }
+                    } else {
+                        DatabaseUtil.udpateUserRoleMappingInBatchMode(dbConnection, sqlStmt2, userIdList, groupName);
+                        DatabaseUtil.udpateUserRoleMappingInBatchMode(dbConnection, sqlStmt2, userIdList, groupName);
+                    }
+                }
+                dbConnection.commit();
+            } catch (SQLException e) {
+                DatabaseUtil.rollBack(dbConnection);
+                String msg = "Error occurred while adding group : " + groupName;
+                if (log.isDebugEnabled()) {
+                    log.debug(msg, e);
+                }
+                throw new UserStoreException(msg, e);
+            }
+        } catch (SQLException e) {
+            String msg = "Error occurred while adding group : " + groupName;
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            throw new UserStoreException(msg, e);
+        } catch (Exception e) {
+            String errorMessage = "Error occurred while adding group : " + groupName;
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            if (e instanceof UserStoreException && ERROR_CODE_DUPLICATE_WHILE_WRITING_TO_DATABASE.getCode()
+                    .equals(((UserStoreException) e).getErrorCode())) {
+                // Duplicate entry.
+                throw new UserStoreException(errorMessage, ERROR_CODE_DUPLICATE_WHILE_ADDING_ROLE.getCode(), e);
+            }
+            // Other SQL Exceptions.
+            throw new UserStoreException(errorMessage, e);
+        }
+    }
+
+    @Override
+    public void doUpdateGroupNameByGroupId(String groupId, String newGroupName) throws UserStoreException {
+
+        if (!isUniqueGroupIdEnabled()) {
+            throw new UserStoreException("Group ID is not supported for userstore: " + getMyDomainName());
+        }
+        if (StringUtils.isBlank(groupId)) {
+            throw new UserStoreClientException(ERROR_EMPTY_GROUP_ID.getMessage());
+        }
+        if (StringUtils.isBlank(newGroupName)) {
+            throw new UserStoreClientException(ERROR_EMPTY_GROUP_NAME.getMessage());
+        }
+        String currentGroupName = doGetGroupNameFromGroupId(groupId);
+        if (StringUtils.isBlank(currentGroupName)) {
+            throw new UserStoreClientException(String.format(ERROR_NO_GROUP_FOUND_WITH_ID.getMessage(), groupId,
+                    CarbonContext.getThreadLocalCarbonContext().getTenantDomain()));
+        }
+
+        String domainFreeCurrentGroupName = UserCoreUtil.removeDomainFromName(currentGroupName);
+        String domainFreeNewGroupName = UserCoreUtil.removeDomainFromName(newGroupName);
+        if (!StringUtils.equalsIgnoreCase(domainFreeCurrentGroupName, domainFreeNewGroupName) &&
+                isExistingRole(domainFreeNewGroupName)) {
+            throw new UserStoreClientException("Group name: " + domainFreeNewGroupName
+                    + " in the system. Please pick another group name.");
+        }
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.UPDATE_GROUP_NAME);
+        if (StringUtils.isBlank(sqlStmt)) {
+            throw new UserStoreException("The sql statement for update role name is null");
+        }
+
+        try (Connection dbConnection = getDBConnection()) {
+            try {
+                if (sqlStmt.contains(UserCoreConstants.UM_TENANT_COLUMN)) {
+                    this.updateValuesToDatabaseWithUTCTime(dbConnection, sqlStmt, domainFreeNewGroupName, new Date(),
+                            groupId, tenantId);
+                } else {
+                    this.updateValuesToDatabaseWithUTCTime(dbConnection, sqlStmt, domainFreeNewGroupName, new Date(), groupId);
+                }
+                dbConnection.commit();
+            } catch (SQLException e) {
+                DatabaseUtil.rollBack(dbConnection);
+                String msg = "Error occurred while updating group name : " + domainFreeNewGroupName;
+                if (log.isDebugEnabled()) {
+                    log.debug(msg, e);
+                }
+                throw new UserStoreException(msg, e);
+            }
+        } catch (SQLException e) {
+            String msg = "Error occurred while updating group name : " + domainFreeNewGroupName;
+            if (log.isDebugEnabled()) {
+                log.debug(msg, e);
+            }
+            throw new UserStoreException(msg, e);
+        }
+    }
+
+    @Override
+    public void doUpdateUserListOfGroup(String groupId, List<String> deletedUserIds, List<String> newUserIds)
+            throws UserStoreException {
+
+        if (!isUniqueGroupIdEnabled()) {
+            throw new UserStoreException("Group ID is not supported for userstore: " + getMyDomainName());
+        }
+        if (StringUtils.isBlank(groupId)) {
+            throw new UserStoreException(ERROR_EMPTY_GROUP_ID.getMessage());
+        }
+        String groupName = doGetGroupNameFromGroupId(groupId);
+        if (StringUtils.isBlank(groupId)) {
+            throw new UserStoreException(
+                    String.format(ERROR_NO_GROUP_FOUND_WITH_ID.getMessage(), groupId, getTenantDomain(tenantId)));
+        }
+        doUpdateUserListOfRoleWithID(UserCoreUtil.removeDomainFromName(groupName),
+                deletedUserIds.toArray(new String[0]), newUserIds.toArray(new String[0]));
+    }
+
+    @Override
+    public void doDeleteGroupByGroupId(String groupId) throws UserStoreException {
+
+        if (!isUniqueGroupIdEnabled()) {
+            throw new UserStoreException("Group ID is not supported for userstore: " + getMyDomainName());
+        }
+        if (StringUtils.isBlank(groupId)) {
+            throw new UserStoreException(ERROR_EMPTY_GROUP_ID.getMessage());
+        }
+        String groupName = doGetGroupNameFromGroupId(groupId);
+        if (StringUtils.isBlank(groupId)) {
+            throw new UserStoreException(String.format(ERROR_NO_GROUP_FOUND_WITH_ID.getMessage(), groupId,
+                        CarbonContext.getThreadLocalCarbonContext().getTenantDomain()));
+        }
+        doDeleteRole(UserCoreUtil.removeDomainFromName(groupName));
+    }
+
     private void populatePrepareStatement(SqlBuilder sqlBuilder, PreparedStatement prepStmt, int startIndex,
             int endIndex) throws SQLException {
 
@@ -3415,7 +4116,11 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
 
         for (Map.Entry<Integer, String> entry : stringParameters.entrySet()) {
             if (entry.getKey() > startIndex && entry.getKey() <= endIndex) {
-                prepStmt.setString(entry.getKey() - startIndex, entry.getValue());
+                if (isStoreUserAttributeAsUnicode()) {
+                    prepStmt.setNString(entry.getKey() - startIndex, entry.getValue());
+                } else {
+                    prepStmt.setString(entry.getKey() - startIndex, entry.getValue());
+                }
             }
         }
 
@@ -3652,7 +4357,7 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME = ?", expressionCondition.getAttributeValue());
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME = LOWER(?)", expressionCondition.getAttributeValue());
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) = LOWER(?)", expressionCondition.getAttributeValue());
                 }
             } else if (ExpressionOperation.CO.toString().equals(expressionCondition.getOperation())
                     && ExpressionAttribute.USERNAME.toString().equals(expressionCondition.getAttributeName())) {
@@ -3660,21 +4365,24 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", "%" + expressionCondition.getAttributeValue() + "%");
                 } else {
                     sqlBuilder
-                            .where("U.UM_USER_NAME LIKE LOWER(?)", "%" + expressionCondition.getAttributeValue() + "%");
+                            .where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", "%" +
+                                    expressionCondition.getAttributeValue() + "%");
                 }
             } else if (ExpressionOperation.EW.toString().equals(expressionCondition.getOperation())
                     && ExpressionAttribute.USERNAME.toString().equals(expressionCondition.getAttributeName())) {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", "%" + expressionCondition.getAttributeValue());
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", "%" + expressionCondition.getAttributeValue());
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)", "%" +
+                            expressionCondition.getAttributeValue());
                 }
             } else if (ExpressionOperation.SW.toString().equals(expressionCondition.getOperation())
                     && ExpressionAttribute.USERNAME.toString().equals(expressionCondition.getAttributeName())) {
                 if (isCaseSensitiveUsername()) {
                     sqlBuilder.where("U.UM_USER_NAME LIKE ?", expressionCondition.getAttributeValue() + "%");
                 } else {
-                    sqlBuilder.where("U.UM_USER_NAME LIKE LOWER(?)", expressionCondition.getAttributeValue() + "%");
+                    sqlBuilder.where("LOWER(U.UM_USER_NAME) LIKE LOWER(?)",
+                            expressionCondition.getAttributeValue() + "%");
                 }
             } else {
                 // Claim filtering
@@ -3846,8 +4554,19 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
                     sqlBuilder.setTail(") AS p) WHERE rn BETWEEN ? AND ?", limit, offset);
                 } else if (MSSQL.equals(dbType)) {
                     if (isClaimFiltering && !isGroupFiltering && totalMultiClaimFilters > 1) {
-                        // Handle multi attribute filtering without group filtering.
-                        sqlBuilder.setTail(") AS Q) AS S) AS R) AS P WHERE P.RowNum BETWEEN ? AND ?", limit,
+                        StringBuilder alias = new StringBuilder(") As Q0");
+                    /*
+                     * x is used to count the number of sub queries.
+                     * (totalMultiClaimFilters * 2) --> totalMultiClaims are multiplied by 2 as 2 sub queries for
+                     * every new claim.
+                     * (totalMultiClaimFilters * 2) - 1 is deducted as there is 1 sub query in the SQL query.
+                     */
+                    int x;
+                    for ( x = 1; x <= (totalMultiClaimFilters * 2 - 1); x++) {
+                        alias = alias.append(" ) AS Q" + x );
+                    }
+                    String tail = alias.toString().concat(" WHERE Q" + String.valueOf(x-1) + ".RowNum BETWEEN ? AND ?");// Handle multi attribute filtering without group filtering.
+                        sqlBuilder.setTail(tail, limit,
                                 offset);
                     } else {
                         sqlBuilder.setTail(") AS R) AS P WHERE P.RowNum BETWEEN ? AND ?", limit, offset);
@@ -3934,13 +4653,29 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
         sqlBuilder.where("UA.UM_ATTR_NAME = ?", attributeName);
 
         if (ExpressionOperation.EQ.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) = LOWER(?)", attributeValue);
+            }
         } else if (ExpressionOperation.EW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue);
+            }
         } else if (ExpressionOperation.CO.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue + "%");
+            }
         } else if (ExpressionOperation.SW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", attributeValue + "%");
+            }
         }
     }
 
@@ -3962,13 +4697,29 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
         sqlBuilder.updateSqlWithOROperation("UA.UM_ATTR_NAME = ?", attributeName);
 
         if (ExpressionOperation.EQ.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE = ?", attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) = LOWER(?)", attributeValue);
+            }
         } else if (ExpressionOperation.EW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue);
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue);
+            }
         } else if (ExpressionOperation.CO.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", "%" + attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", "%" + attributeValue + "%");
+            }
         } else if (ExpressionOperation.SW.toString().equals(operation)) {
-            sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            if (isCaseSensitiveUsername()) {
+                sqlBuilder.where("UA.UM_ATTR_VALUE LIKE ?", attributeValue + "%");
+            } else {
+                sqlBuilder.where("LOWER(UA.UM_ATTR_VALUE) LIKE LOWER(?)", attributeValue + "%");
+            }
         }
     }
 
@@ -4022,5 +4773,194 @@ public class UniqueIDJDBCUserStoreManager extends JDBCUserStoreManager {
     public boolean isUniqueUserIdEnabled() {
 
         return true;
+    }
+
+    /**
+     * Select and update lock the user attribute rows before the update operation.
+     *
+     * @param dbConnection Database connection.
+     * @param userID       User id of the user.
+     * @throws UserStoreException If an error occurred while executing statement.
+     */
+    private void selectRowsForUpdate(Connection dbConnection, String userID) throws UserStoreException {
+
+        String sqlStmt = realmConfig.getUserStoreProperty(JDBCRealmConstants.SELECT_USER_PROPERTIES_WITH_ID);
+        try (PreparedStatement prepStmt = dbConnection.prepareStatement(sqlStmt)) {
+            prepStmt.setString(1, userID);
+            prepStmt.setInt(2, tenantId);
+            prepStmt.executeQuery();
+        } catch (SQLException e) {
+            String errorMessage = "Error while selecting rows for updating user attributes";
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            throw new UserStoreException(errorMessage, e);
+        }
+    }
+
+    /**
+     * Check if the DB is MSSQL.
+     *
+     * @return true if MSSQL, false otherwise.
+     * @throws UserStoreException if error occurred while getting database type.
+     */
+    private boolean isMSSQLDB(Connection dbConnection) throws UserStoreException {
+
+        try {
+            return MSSQL.equalsIgnoreCase(DatabaseCreator.getDatabaseType(dbConnection));
+        } catch (Exception e) {
+            throw new UserStoreException("Error while retrieving the DB type. ", e);
+        }
+    }
+
+    /**
+     * Paginate a group list.
+     *
+     * @param givenOffset Offset.
+     * @param givenLimit  Limit.
+     * @param groupsList  List of objects.
+     * @return Paginated list of groups.
+     */
+    private List<String> paginateGroupsList(int givenOffset, int givenLimit, List<String> groupsList) {
+
+        if (CollectionUtils.isEmpty(groupsList)) {
+            groupsList = new ArrayList<>();
+        }
+        // Resolve with the default values.
+        int startIndex = resolveListOffset(givenOffset);
+        int resolvedLimit = resolveGroupListLimit(givenLimit);
+        int numberOfResults = groupsList.size();
+
+        // We cannot return more than the available results. Therefore, max would be the available results.
+        if (numberOfResults < resolvedLimit) {
+            resolvedLimit = numberOfResults;
+        }
+        // We need to subtract 1 since indexes are starting from 0.
+        int lastIndexOfTheResultsList = numberOfResults - 1;
+        // When the offset is larger the available results.
+        if (lastIndexOfTheResultsList < startIndex) {
+            return new ArrayList<>();
+        }
+        if (lastIndexOfTheResultsList == startIndex) {
+            return groupsList.subList(lastIndexOfTheResultsList, lastIndexOfTheResultsList + 1);
+        }
+        int endIndex = resolvedLimit + startIndex - 1;
+        if (lastIndexOfTheResultsList <= endIndex) {
+            // Return from the start to the end of the list.
+            return groupsList.subList(startIndex, lastIndexOfTheResultsList + 1);
+        }
+        return groupsList.subList(startIndex, endIndex + 1);
+    }
+
+    /**
+     * Calculate the array offset needed to pagination.
+     *
+     * @param givenOffset Given offset value.
+     * @return Resolved offset value.
+     */
+    private int resolveListOffset(int givenOffset) {
+
+        if (givenOffset <= 1) {
+            return 0;
+        }
+        // We need to subtract 1 since indexes are starting from 0.
+        return givenOffset - 1;
+    }
+
+    /**
+     * Resolve the given group list limit with the max configs defined for the userstore.
+     *
+     * @param givenLimit Given user list limit.
+     * @return Resolved group list limit.
+     */
+    private int resolveGroupListLimit(int givenLimit) {
+
+        int definedMax;
+        try {
+            definedMax = Integer
+                    .parseInt(realmConfig.getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_MAX_ROLE_LIST));
+        } catch (NumberFormatException e) {
+            definedMax = UserCoreConstants.MAX_USER_ROLE_LIST;
+        }
+        if (givenLimit < 0 || givenLimit > definedMax) {
+            if (log.isDebugEnabled()) {
+                log.debug(String.format("Using the userstore defined max group list limit: %s instead of given " +
+                        "limit: %s ", definedMax, givenLimit));
+            }
+            return definedMax;
+        }
+        return givenLimit;
+    }
+
+    /**
+     * Validate the expression condition for group filtering.
+     *
+     * @param expressionCondition Expression condition.
+     * @throws UserStoreClientException Thrown if the expression condition is invalid.
+     */
+    private void validateExpressionConditionForGroup(ExpressionCondition expressionCondition) throws
+            UserStoreClientException {
+
+        String attributeName = expressionCondition.getAttributeName();
+        String operation = expressionCondition.getOperation();
+
+        if (StringUtils.equals(attributeName, GROUP_ID_ATTRIBUTE) ||
+                StringUtils.equals(attributeName, GROUP_CREATED_DATE_ATTRIBUTE) ||
+                StringUtils.equals(attributeName, GROUP_LAST_MODIFIED_DATE_ATTRIBUTE)) {
+            if ((StringUtils.equals(attributeName, GROUP_CREATED_DATE_ATTRIBUTE) ||
+                    StringUtils.equals(attributeName, GROUP_LAST_MODIFIED_DATE_ATTRIBUTE)) &&
+                    !StringUtils.equalsIgnoreCase(operation, ExpressionOperation.EQ.toString())) {
+                throw new UserStoreClientException(String.format(ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getMessage(),
+                        "Unsupported operation: " + operation), ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getCode());
+            }
+        } else {
+            throw new UserStoreClientException(String.format(ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getMessage(),
+                    "Unsupported attribute name: " + attributeName), ERROR_UNSUPPORTED_GROUP_SEARCH_FILTER.getCode());
+        }
+    }
+
+    /**
+     * Build the search value after appending the delimiters according to the attribute name to be filtered.
+     *
+     * @param filterOperation Operator value.
+     * @param attributeValue  Search value.
+     * @param delimiter       Filter delimiter based on search type.
+     * @return Search attribute.
+     */
+    private String buildSearchAttributeValue(String filterOperation, String attributeValue, String delimiter) {
+
+        String searchAttributeForSQL = null;
+        if (filterOperation.equalsIgnoreCase(ExpressionOperation.CO.toString())) {
+            searchAttributeForSQL = delimiter + attributeValue + delimiter;
+        } else if (filterOperation.equalsIgnoreCase(ExpressionOperation.SW.toString())) {
+            searchAttributeForSQL = attributeValue + delimiter;
+        } else if (filterOperation.equalsIgnoreCase(ExpressionOperation.EW.toString())) {
+            searchAttributeForSQL = delimiter + attributeValue;
+        } else if (filterOperation.equalsIgnoreCase(ExpressionOperation.EQ.toString())) {
+            searchAttributeForSQL = attributeValue;
+        }
+        return searchAttributeForSQL;
+    }
+
+    /**
+     * Build timestamp using the given date-time string.
+     *
+     * @param standardTimestamp Standard date-time string.
+     * @return Timestamp value.
+     */
+    private Timestamp getTimeStampFromString(String standardTimestamp) throws UserStoreClientException {
+
+        try {
+            LocalDateTime localDateTime = LocalDateTime.parse(standardTimestamp, DateTimeFormatter.ISO_DATE_TIME);
+            OffsetDateTime offsetDateTime = OffsetDateTime.of(localDateTime, OffsetDateTime.now().getOffset());
+            Timestamp timestampJavaTime = Timestamp.valueOf(offsetDateTime.toLocalDateTime());
+            return timestampJavaTime;
+        } catch (DateTimeParseException e) {
+            if (log.isDebugEnabled()) {
+                log.debug("Error occurred while parsing the date-time string: " + standardTimestamp, e);
+            }
+            throw new UserStoreClientException(ERROR_UNSUPPORTED_DATE_SEARCH_FILTER.getMessage(),
+                    ERROR_UNSUPPORTED_DATE_SEARCH_FILTER.getCode(), e);
+        }
     }
 }

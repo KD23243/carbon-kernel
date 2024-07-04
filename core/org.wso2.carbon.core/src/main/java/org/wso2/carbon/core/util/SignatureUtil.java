@@ -17,10 +17,13 @@
 */
 package org.wso2.carbon.core.util;
 
+import org.apache.commons.lang.StringUtils;
 import org.wso2.carbon.base.MultitenantConstants;
+import org.wso2.carbon.base.ServerConfiguration;
 import org.wso2.carbon.base.api.ServerConfigurationService;
 import org.wso2.carbon.core.RegistryResources;
 import org.wso2.carbon.core.internal.CarbonCoreDataHolder;
+import org.wso2.carbon.utils.ServerConstants;
 
 import java.security.*;
 import java.security.cert.Certificate;
@@ -28,19 +31,36 @@ import java.security.cert.X509Certificate;
 import java.util.Arrays;
 import java.util.Enumeration;
 
+import static org.wso2.carbon.core.util.CryptoUtil.getJCEProvider;
+
 public class SignatureUtil {
 
-    private static final String THUMB_DIGEST_ALGORITHM = "SHA-1";
+    private static final String THUMB_DIGEST_ALGORITHM_SHA1 = "SHA-1";
+    private static final String THUMB_DIGEST_ALGORITHM_SHA256 = "SHA-256";
+    private static final String signatureAlgorithmSHA1 = "SHA1withRSA";
+    private static final String signatureAlgorithmSHA256 = "SHA256withRSA";
 
-    private static String signatureAlgorithm = "SHA1withRSA";
-    private static String provider = "BC";
 
     private SignatureUtil() {
         // hide default constructor for utility class
     }
 
     public static void init() throws Exception {
-        Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
+
+        String providerName = ServerConfiguration.getInstance().getFirstProperty(ServerConstants.JCE_PROVIDER);
+        Provider provider;
+        if (StringUtils.isBlank(providerName) || providerName.equals(ServerConstants.JCE_PROVIDER_BC)) {
+            provider = (Provider) (Class.forName("org.bouncycastle.jce.provider.BouncyCastleProvider")).
+                    getDeclaredConstructor().newInstance();
+
+        } else if (providerName.equals(ServerConstants.JCE_PROVIDER_BCFIPS)) {
+            provider = (Provider) (Class.forName("org.bouncycastle.jcajce.provider.BouncyCastleFipsProvider")).
+                    getDeclaredConstructor().newInstance();
+
+        } else {
+            throw new NoSuchProviderException("Configured JCE provider is not supported.");
+        }
+        Security.addProvider(provider);
     }
 
     /**
@@ -51,7 +71,14 @@ public class SignatureUtil {
      * @throws Exception
      */
     public static byte[] getThumbPrintForAlias(String alias) throws Exception {
-        MessageDigest sha = MessageDigest.getInstance(THUMB_DIGEST_ALGORITHM);
+
+        MessageDigest sha;
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance().getFirstProperty(
+                ServerConstants.SIGNATURE_UTIL_ENABLE_SHA256_ALGO))) {
+            sha = MessageDigest.getInstance(THUMB_DIGEST_ALGORITHM_SHA256);
+        } else {
+            sha = MessageDigest.getInstance(THUMB_DIGEST_ALGORITHM_SHA1);
+        }
         sha.reset();
         Certificate cert = getCertificate(alias);
         sha.update(cert.getEncoded());
@@ -68,7 +95,14 @@ public class SignatureUtil {
      * @throws Exception
      */
     public static boolean validateSignature(byte[] thumb, String data, byte[] signature) throws Exception {
-        Signature signer = Signature.getInstance(signatureAlgorithm, provider);
+
+        Signature signer;
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance().getFirstProperty(
+                ServerConstants.SIGNATURE_UTIL_ENABLE_SHA256_ALGO))) {
+            signer = Signature.getInstance(signatureAlgorithmSHA256, getJCEProvider());
+        } else {
+            signer = Signature.getInstance(signatureAlgorithmSHA1, getJCEProvider());
+        }
         signer.initVerify(getPublicKey(thumb));
         signer.update(data.getBytes());
         return signer.verify(signature);
@@ -83,7 +117,14 @@ public class SignatureUtil {
      * @throws Exception
      */
     public static boolean validateSignature(String data, byte[] signature) throws Exception {
-        Signature signer = Signature.getInstance(signatureAlgorithm, provider);
+
+        Signature signer;
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance().getFirstProperty(
+                ServerConstants.SIGNATURE_UTIL_ENABLE_SHA256_ALGO))) {
+            signer = Signature.getInstance(signatureAlgorithmSHA256, getJCEProvider());
+        } else {
+            signer = Signature.getInstance(signatureAlgorithmSHA1, getJCEProvider());
+        }
         signer.initVerify(getDefaultPublicKey());
         signer.update(data.getBytes());
         return signer.verify(signature);
@@ -97,7 +138,14 @@ public class SignatureUtil {
      * @throws Exception
      */
     public static byte[] doSignature(String data) throws Exception {
-        Signature signer = Signature.getInstance(signatureAlgorithm, provider);
+
+        Signature signer;
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance().getFirstProperty(
+                ServerConstants.SIGNATURE_UTIL_ENABLE_SHA256_ALGO))) {
+            signer = Signature.getInstance(signatureAlgorithmSHA256, getJCEProvider());
+        } else {
+            signer = Signature.getInstance(signatureAlgorithmSHA1, getJCEProvider());
+        }
         signer.initSign(getDefaultPrivateKey());
         signer.update(data.getBytes());
         return signer.sign();
@@ -131,7 +179,13 @@ public class SignatureUtil {
         KeyStore keyStore = keyStoreMan.getPrimaryKeyStore();
         PublicKey pubKey = null;
         Certificate cert = null;
-        MessageDigest sha = MessageDigest.getInstance(THUMB_DIGEST_ALGORITHM);
+        MessageDigest sha;
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance().getFirstProperty(
+                ServerConstants.SIGNATURE_UTIL_ENABLE_SHA256_ALGO))) {
+            sha = MessageDigest.getInstance(THUMB_DIGEST_ALGORITHM_SHA256);
+        } else {
+            sha = MessageDigest.getInstance(THUMB_DIGEST_ALGORITHM_SHA1);
+        }
         sha.reset();
         for (Enumeration<String> e = keyStore.aliases(); e.hasMoreElements(); ) {
             String alias = e.nextElement();

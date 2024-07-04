@@ -126,6 +126,10 @@ public class UserCoreConstants {
         PREVIOUS, NEXT
     }
 
+    // Server level config introduced for backward compatibility with the CircuitBreaker.
+    public static final String PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE =
+            "UserStore.enableCircuitBreakerForUserStores";
+
     public static final class RealmConfig {
         public static final String LOCAL_NAME_USER_MANAGER = "UserManager";
         public static final String LOCAL_NAME_REALM = "Realm";
@@ -138,6 +142,7 @@ public class UserCoreConstants {
         public static final String LOCAL_NAME_ADMIN_USER = "AdminUser";
         public static final String LOCAL_NAME_USER_NAME = "UserName";
         public static final String LOCAL_NAME_PASSWORD = "Password";
+        public static final String LOCAL_NAME_USERID = "UserId";
         public static final String LOCAL_NAME_AUTHENTICATOR = "Authenticator";
         public static final String LOCAL_NAME_USER_STORE_MANAGER = "UserStoreManager";
         public static final String LOCAL_NAME_ATHZ_MANAGER = "AuthorizationManager";
@@ -243,6 +248,9 @@ public class UserCoreConstants {
         public static final String LEADING_OR_TRAILING_SPACE_ALLOWED_IN_USERNAME =
                 "LeadingOrTrailingSpaceAllowedInUserName";
         public static final String PROPERTY_USER_ID_ENABLED = "UserIDEnabled";
+
+        public static final String CIRCUIT_STATE_OPEN = "open";
+        public static final String CIRCUIT_STATE_CLOSE = "close";
     }
 
     public static final class ClaimTypeURIs {

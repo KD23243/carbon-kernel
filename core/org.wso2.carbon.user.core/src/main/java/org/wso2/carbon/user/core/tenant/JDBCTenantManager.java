@@ -1,21 +1,21 @@
 /*
- *  Copyright (c) 2005-2008, WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ * Copyright (c) 2005-2024, WSO2 LLC. (http://www.wso2.com).
  *
- *  WSO2 Inc. licenses this file to you under the Apache License,
- *  Version 2.0 (the "License"); you may not use this file except
- *  in compliance with the License.
- *  You may obtain a copy of the License at
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *  http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
- *  Unless required by applicable law or agreed to in writing,
- *  software distributed under the License is distributed on an
- *  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- *  KIND, either express or implied.  See the License for the
- *  specific language governing permissions and limitations
- *  under the License.
- *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
+
 package org.wso2.carbon.user.core.tenant;
 
 import org.apache.axiom.om.OMElement;
@@ -79,7 +79,7 @@ public class JDBCTenantManager implements TenantManager {
     protected TenantCache tenantCacheManager = TenantCache.getInstance();
     DataSource dataSource;
     private static Boolean tenantUniqueIdColumnAvailable;
-    private static Boolean orgUUIDColumnAvailable;
+    private static Boolean orgUUIDColumnAvailable = false;
     private static final String DB2 = "db2";
     private static final String MSSQL = "mssql";
     private static final String ORACLE = "oracle";
@@ -278,15 +278,13 @@ public class JDBCTenantManager implements TenantManager {
             InputStream is = new ByteArrayInputStream(realmConfigString.getBytes());
             prepStmt.setBinaryStream(5, is, is.available());
 
-            if (isTenantUniqueIdColumnAvailable()) {
+            if (isOrgUUIDColumnAvailable && !isTenantUniqueIdColumnAvailable()) {
+                prepStmt.setString(6, tenant.getAssociatedOrganizationUUID());
+            } else if (!isOrgUUIDColumnAvailable && isTenantUniqueIdColumnAvailable()) {
                 prepStmt.setString(6, tenant.getTenantUniqueID());
-                if (isOrgUUIDColumnAvailable) {
-                    prepStmt.setString(7, tenant.getAssociatedOrganizationUUID());
-                }
-            } else {
-                if (isOrgUUIDColumnAvailable) {
-                    prepStmt.setString(6, tenant.getAssociatedOrganizationUUID());
-                }
+            } else if (isOrgUUIDColumnAvailable && isTenantUniqueIdColumnAvailable()) {
+                prepStmt.setString(6, tenant.getAssociatedOrganizationUUID());
+                prepStmt.setString(7, tenant.getTenantUniqueID());
             }
 
             prepStmt.executeUpdate();
@@ -332,6 +330,9 @@ public class JDBCTenantManager implements TenantManager {
         try {
             dbConnection = getDBConnection();
             String sqlStmt = TenantConstants.UPDATE_TENANT_SQL;
+            if (tenant.getAssociatedOrganizationUUID() != null) {
+                sqlStmt = TenantConstants.UPDATE_TENANT_WITH_ASSOCIATE_UUID_SQL;
+            }
             prepStmt = dbConnection.prepareStatement(sqlStmt);
             prepStmt.setString(1, tenant.getDomain().toLowerCase());
             prepStmt.setString(2, tenant.getEmail());
@@ -343,7 +344,12 @@ public class JDBCTenantManager implements TenantManager {
                 createdTimeMs = createdTime.getTime();
             }
             prepStmt.setTimestamp(3, new Timestamp(createdTimeMs));
-            prepStmt.setInt(4, tenant.getId());
+            if (tenant.getAssociatedOrganizationUUID() != null) {
+                prepStmt.setString(4, tenant.getAssociatedOrganizationUUID());
+                prepStmt.setInt(5, tenant.getId());
+            } else {
+                prepStmt.setInt(4, tenant.getId());
+            }
 
             prepStmt.executeUpdate();
 
@@ -418,9 +424,10 @@ public class JDBCTenantManager implements TenantManager {
     @SuppressWarnings("unchecked")
     public Tenant getTenant(int tenantId) throws UserStoreException {
 
-
+        if (tenantId == MultitenantConstants.SUPER_TENANT_ID) {
+            return null;
+        }
         TenantCacheEntry<Tenant> entry = tenantCacheManager.getValueFromCache(new TenantIdKey(tenantId));
-
         if ((entry != null) && (entry.getTenant() != null)) {
             return entry.getTenant();
         }
@@ -473,6 +480,7 @@ public class JDBCTenantManager implements TenantManager {
                 tenant.setRealmConfig(realmConfig);
                 setSecondaryUserStoreConfig(realmConfig, tenantId);
                 tenant.setAdminName(realmConfig.getAdminUserName());
+                tenant.setAdminUserId(realmConfig.getAdminUserId());
                 if (tenantUUIDColumnExists) {
                     tenant.setTenantUniqueID(uniqueId);
                 }
@@ -511,6 +519,9 @@ public class JDBCTenantManager implements TenantManager {
         try {
             dbConnection = getDBConnection();
             String sqlStmt = TenantConstants.GET_ALL_TENANTS_SQL;
+            if (isOrgUUIDColumnAvailable()) {
+                sqlStmt = TenantConstants.GET_ALL_TENANTS_EXCEPT_ORGANIZATIONS_SQL;
+            }
             prepStmt = dbConnection.prepareStatement(sqlStmt);
 
             result = prepStmt.executeQuery();
@@ -802,9 +813,23 @@ public class JDBCTenantManager implements TenantManager {
                 tenant.setRealmConfig(realmConfig);
                 setSecondaryUserStoreConfig(realmConfig, id);
                 tenant.setAdminName(realmConfig.getAdminUserName());
-                // Handle the admin UUID resolution properly with https://github.com/wso2/product-is/issues/14001.
                 if (StringUtils.isNotBlank(tenant.getAssociatedOrganizationUUID())) {
-                    tenant.setAdminUserId(realmConfig.getAdminUserName());
+                    String adminId = realmConfig.getAdminUserId();
+                    if (StringUtils.isNotBlank(adminId)) {
+                        tenant.setAdminUserId(adminId);
+                    } else {
+                        // If realms were not migrated after https://github.com/wso2/product-is/issues/14001.
+                        try {
+                            /*
+                            Try to resolve user id from username. This get successful if the user store manager
+                            can resolve the user id even when the user does not belong to the tenant user store
+                             */
+                            tenant.setAdminUserId(getUserId(realmConfig.getAdminUserName(), id));
+                        } catch (UserStoreException ex) {
+                            // Failure to resolve user id from username means the user id is stored as the username.
+                            tenant.setAdminUserId(realmConfig.getAdminUserName());
+                        }
+                    }
                 } else {
                     tenant.setAdminUserId(getUserId(realmConfig.getAdminUserName(), id));
                 }
@@ -1103,9 +1128,14 @@ public class JDBCTenantManager implements TenantManager {
     private void clearTenantCache(int tenantId) throws UserStoreException {
 
         String domain = getDomain(tenantId);
+        Tenant tenant = this.getTenant(tenantId);
         tenantDomainCache.clearCacheEntry(new TenantIdKey(tenantId));
         tenantIdCache.clearCacheEntry(new TenantDomainKey(domain));
         tenantCacheManager.clearCacheEntry(new TenantIdKey(tenantId));
+        if (tenant != null) {
+            String tenantUniqueID = tenant.getTenantUniqueID();
+            tenantUniqueIdCache.clearCacheEntry(new TenantUniqueIDKey(tenantUniqueID));
+        }
     }
 
     private void clearTenantCaches(String tenantUniqueID) throws UserStoreException {
@@ -1392,7 +1422,7 @@ public class JDBCTenantManager implements TenantManager {
 
     private boolean isOrgUUIDColumnAvailable() throws UserStoreException {
 
-        if (orgUUIDColumnAvailable == null) {
+        if (!orgUUIDColumnAvailable) {
             orgUUIDColumnAvailable =  checkOrgUUIDColumnInTable();
         }
         return orgUUIDColumnAvailable;

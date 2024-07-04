@@ -25,6 +25,7 @@ import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.CarbonConstants;
 import org.wso2.carbon.base.MultitenantConstants;
+import org.wso2.carbon.base.ServerConfiguration;
 import org.wso2.carbon.caching.impl.CachingConstants;
 import org.wso2.carbon.context.CarbonContext;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
@@ -105,6 +106,8 @@ import javax.naming.ldap.Rdn;
 import javax.naming.ldap.SortControl;
 import javax.sql.DataSource;
 
+import static org.wso2.carbon.user.core.UserCoreConstants.PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE;
+import static org.wso2.carbon.user.core.UserCoreConstants.RealmConfig.CIRCUIT_STATE_OPEN;
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_CREATED_DATE_ATTRIBUTE;
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_ID_ATTRIBUTE;
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.GROUP_LAST_MODIFIED_DATE_ATTRIBUTE;
@@ -792,6 +795,13 @@ public class ReadOnlyLDAPUserStoreManager extends AbstractUserStoreManager {
         RoleContext roleContext = createRoleContext(roleName);  // TODO if role Name with Shared Role?
         return isExistingLDAPRole(roleContext);
 
+    }
+
+    @Override
+    protected boolean doCheckExistingGroupName(String groupName) throws UserStoreException {
+
+        RoleContext roleContext = createRoleContext(groupName);
+        return isExistingLDAPRole(roleContext);
     }
 
     protected boolean isExistingLDAPRole(RoleContext context) throws UserStoreException {
@@ -3045,6 +3055,9 @@ public class ReadOnlyLDAPUserStoreManager extends AbstractUserStoreManager {
     protected List<ExpressionCondition> getExpressionConditions(Condition condition) {
 
         List<ExpressionCondition> expressionConditions = new ArrayList<>();
+        if (condition == null) {
+            return expressionConditions;
+        }
         getExpressionConditionsAsList(condition, expressionConditions);
         return expressionConditions;
     }
@@ -3337,11 +3350,16 @@ public class ReadOnlyLDAPUserStoreManager extends AbstractUserStoreManager {
                     }
                 }
             } catch (NamingException e) {
+
+                // Close context before throwing the exception
+                JNDIUtil.closeContext(dirContext);
+
                 log.error(String.format("Error in reading user information in the user store for the user %s, %s",
                         user, e.getMessage()));
                 throw new UserStoreException(e.getMessage(), e);
             }
         }
+        JNDIUtil.closeContext(dirContext);
         return userNameList;
     }
 
@@ -3377,7 +3395,7 @@ public class ReadOnlyLDAPUserStoreManager extends AbstractUserStoreManager {
                     String attr = (String) attrs.next();
                     if (StringUtils.isNotEmpty(attr.trim())) {
                         String attrSeparator = realmConfig.getUserStoreProperty(MULTI_ATTRIBUTE_SEPARATOR);
-                        if (StringUtils.isNotEmpty(attrSeparator.trim())) {
+                        if (StringUtils.isNotBlank(attrSeparator)) {
                             userAttributeSeparator = attrSeparator;
                         }
                         attrBuffer.append(attr + userAttributeSeparator);
@@ -3484,20 +3502,26 @@ public class ReadOnlyLDAPUserStoreManager extends AbstractUserStoreManager {
     private List<String> getMatchUserNames(ExpressionCondition expressionCondition, List<String> users) {
 
         List<String> newUserNameList = new ArrayList<>();
+        String attributeValue = (expressionCondition.getAttributeValue() != null) ?
+                expressionCondition.getAttributeValue().toLowerCase() : expressionCondition.getAttributeValue();
 
         for (String user : users) {
-            if (ExpressionOperation.SW.toString().equals(expressionCondition.getOperation())
-                    && user.startsWith(expressionCondition.getAttributeValue()) && !newUserNameList.contains(user)) {
-                newUserNameList.add(user);
-            } else if (ExpressionOperation.EQ.toString().equals(expressionCondition.getOperation())
-                    && user.equals(expressionCondition.getAttributeValue()) && !newUserNameList.contains(user)) {
-                newUserNameList.add(user);
-            } else if (ExpressionOperation.CO.toString().equals(expressionCondition.getOperation())
-                    && user.contains(expressionCondition.getAttributeValue()) && !newUserNameList.contains(user)) {
-                newUserNameList.add(user);
-            } else if (ExpressionOperation.EW.toString().equals(expressionCondition.getOperation())
-                    && user.endsWith(expressionCondition.getAttributeValue()) && !newUserNameList.contains(user)) {
-                newUserNameList.add(user);
+            String username = user;
+            if (StringUtils.isNotBlank(username)) {
+                username = username.toLowerCase();
+                if (ExpressionOperation.SW.toString().equals(expressionCondition.getOperation())
+                        && username.startsWith(attributeValue) && !newUserNameList.contains(user)) {
+                    newUserNameList.add(user);
+                } else if (ExpressionOperation.EQ.toString().equals(expressionCondition.getOperation())
+                        && username.equals(attributeValue) && !newUserNameList.contains(user)) {
+                    newUserNameList.add(user);
+                } else if (ExpressionOperation.CO.toString().equals(expressionCondition.getOperation())
+                        && username.contains(attributeValue) && !newUserNameList.contains(user)) {
+                    newUserNameList.add(user);
+                } else if (ExpressionOperation.EW.toString().equals(expressionCondition.getOperation())
+                        && username.endsWith(attributeValue) && !newUserNameList.contains(user)) {
+                    newUserNameList.add(user);
+                }
             }
         }
         return newUserNameList;
@@ -4500,10 +4524,16 @@ public class ReadOnlyLDAPUserStoreManager extends AbstractUserStoreManager {
         setAdvancedProperty(UserStoreConfigConstants.STARTTLS_ENABLED,
                 UserStoreConfigConstants.STARTTLS_ENABLED_DISPLAY_NAME, "false",
                 UserStoreConfigConstants.STARTTLS_ENABLED_DESCRIPTION);
+        /* Added to implement Circuit Breaker. */
         setAdvancedProperty(UserStoreConfigConstants.CONNECTION_RETRY_DELAY,
                 UserStoreConfigConstants.CONNECTION_RETRY_DELAY_DISPLAY_NAME,
                 String.valueOf(UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS),
                 UserStoreConfigConstants.CONNECTION_RETRY_DELAY_DESCRIPTION);
+        setAdvancedProperty(UserStoreConfigConstants.CONNECTION_RETRY_COUNT,
+                UserStoreConfigConstants.CONNECTION_RETRY_COUNT_DISPLAY_NAME,
+                String.valueOf(UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_COUNT),
+                UserStoreConfigConstants.CONNECTION_RETRY_COUNT_DESCRIPTION);
+
         setAdvancedProperty(UserStoreConfigConstants.SSLCertificateValidationEnabled, "Enable SSL certificate" +
                 " validation", "true", UserStoreConfigConstants.SSLCertificateValidationEnabledDescription);
         setAdvancedProperty(UserStoreConfigConstants.immutableAttributes,
@@ -4831,5 +4861,30 @@ public class ReadOnlyLDAPUserStoreManager extends AbstractUserStoreManager {
         OffsetDateTime offsetDateTime = OffsetDateTime.parse(date, dateTimeFormatter);
         Instant instant = offsetDateTime.toInstant();
         return instant.toString();
+    }
+
+    /**
+     * Verify Circuit Breaker state for user store.
+     *
+     * @return true if CircuitBreaker Open, false otherwise.
+     */
+    public boolean isCircuitBreakerEnabledAndOpen() throws UserStoreException {
+
+        if (Boolean.parseBoolean(ServerConfiguration.getInstance()
+                .getFirstProperty(PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE))) {
+
+            long circuitOpenDuration = System.currentTimeMillis() - this.connectionSource.getThresholdStartTime();
+            if (CIRCUIT_STATE_OPEN.equals(this.connectionSource.getCircuitBreakerState())
+                    && circuitOpenDuration <=  this.connectionSource.getValidatedThresholdTimeoutInMilliseconds
+                    (connectionSource.getThresholdTimeoutInMilliseconds())) {
+                log.warn("LDAP connection circuit breaker is in open state for " + circuitOpenDuration
+                        + "ms and has not reach the threshold timeout: "
+                        + this.connectionSource.getThresholdTimeoutInMilliseconds() + "ms. " +
+                        "Hence avoid establishing the LDAP connection for domain: " + this.getMyDomainName());
+
+                return true;
+            }
+        }
+        return false;
     }
 }

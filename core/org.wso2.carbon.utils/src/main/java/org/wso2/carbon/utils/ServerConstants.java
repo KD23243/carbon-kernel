@@ -153,7 +153,13 @@ public final class ServerConstants {
     public static final String GENERATED_PAGES = "local_wso2wsas.generated.pages";
     public static final String CONFIGURATION_CONTEXT = "CONFIGURATION_CONTEXT";
     public static final String STS_NAME = "wso2carbon-sts";
+    public static final String DEFAULT_PASSWORD_VALIDITY_PERIOD = "DefaultPasswordValidityPeriod";
 
+    public static final String JCE_PROVIDER = "JCEProvider";
+    public static final String JCE_PROVIDER_BC = "BC";
+    public static final String JCE_PROVIDER_BCFIPS = "BCFIPS";
+    public static final String SIGNATURE_UTIL_ENABLE_SHA256_ALGO = "SignatureUtil.EnableSHA256Algo";
+    public static final String ENABLE_LEGACY_AUTHZ_RUNTIME = "EnableLegacyAuthzRuntime";
 
     public static class Axis2ParameterNames {
         public static final String CONTEXT_ROOT = "contextRoot";

@@ -402,7 +402,7 @@ public final class UserCoreUtil {
 
         try {
             // the secure random
-            SecureRandom prng = SecureRandom.getInstance("SHA1PRNG");
+            SecureRandom prng = SecureRandom.getInstance("DRBG");
             for (int i = 0; i < length; i++) {
                 password[i] = passwordChars.charAt(prng.nextInt(passwordFeed.length()));
             }
@@ -724,6 +724,21 @@ public final class UserCoreUtil {
         } else {
             return names;
         }
+    }
+
+    /**
+     * Remove the domain part from the list of names.
+     *
+     * @param names Names list.
+     * @return Domain free names list.
+     */
+    public static List<String> removeDomainFromNames(List<String> names) {
+
+        String[] nameList = removeDomainFromNames(names.toArray(new String[0]));
+        if (ArrayUtils.isEmpty(nameList)) {
+            return new ArrayList<>();
+        }
+        return Arrays.asList(nameList);
     }
 
     /**

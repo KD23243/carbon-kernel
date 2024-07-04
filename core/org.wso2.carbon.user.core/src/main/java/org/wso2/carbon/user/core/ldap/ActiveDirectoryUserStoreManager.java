@@ -171,6 +171,10 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
         try {
             credentialObj = Secret.getSecret(credential);
         } catch (UnsupportedSecretTypeException e) {
+
+            // Close the context before throwing the exception
+            JNDIUtil.closeContext(dirContext);
+
             throw new UserStoreException("Unsupported credential type", e);
         }
 
@@ -263,6 +267,10 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
 
             processAttributesBeforeUpdate(userName, attributeValueMap, null);
 
+            String singleValuedAttributesProperty = Optional.ofNullable(realmConfig
+                    .getUserStoreProperty(UserStoreConfigConstants.singleValuedAttributes)).orElse(StringUtils.EMPTY);
+            String[] singleValuedAttributes = StringUtils.split(singleValuedAttributesProperty, ",");
+
             attributeValueMap.forEach((attributeName, attributeValue) -> {
                 BasicAttribute claim = new BasicAttribute(attributeName);
                 if (attributeValue != null) {
@@ -270,7 +278,9 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
                     if (claimSeparator != null && !claimSeparator.trim().isEmpty()) {
                         userAttributeSeparator = claimSeparator;
                     }
-                    if (attributeValue.contains(userAttributeSeparator)) {
+                    if (attributeValue.contains(userAttributeSeparator) &&
+                            !(ArrayUtils.isNotEmpty(singleValuedAttributes)
+                                    && (Arrays.stream(singleValuedAttributes).anyMatch(attributeName::equals)))) {
                         StringTokenizer st = new StringTokenizer(attributeValue, userAttributeSeparator);
                         while (st.hasMoreElements()) {
                             String newVal = st.nextElement().toString();
@@ -318,6 +328,10 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
         try {
             credentialObj = Secret.getSecret(newCredential);
         } catch (UnsupportedSecretTypeException e) {
+
+            // Close the context before throwing the exception
+            JNDIUtil.closeContext(dirContext);
+
             throw new UserStoreException("Unsupported credential type", e);
         }
 
@@ -574,6 +588,10 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
             // Assume only one user is returned from the search.
             returnedUserEntry = returnedResultList.next().getName();
         } catch (NamingException e) {
+
+            // Close the context before throwing the exception
+            JNDIUtil.closeContext(dirContext);
+
             String errorMessage = "Results could not be retrieved from the directory context for user : " + userName;
             if (logger.isDebugEnabled()) {
                 logger.debug(errorMessage, e);
@@ -666,6 +684,38 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
         DirContext dirContext = null;
         NamingEnumeration<SearchResult> answer = null;
 
+        DirContext groupDirContext = this.connectionSource.getContext();
+        SearchControls searchControls = new SearchControls();
+        searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+        searchControls.setReturningAttributes(null);
+
+        String groupSearchFilter = realmConfig
+                .getUserStoreProperty(LDAPConstants.ROLE_NAME_FILTER);
+        groupSearchFilter = groupSearchFilter.replace("?", escapeSpecialCharactersForFilter(
+                context.getRoleName()));
+        NamingEnumeration<SearchResult> returnedResultList = null;
+        String returnedGroupEntry;
+
+        try {
+            returnedResultList = groupDirContext.search(escapeDNForSearch(groupSearchBase),
+                    groupSearchFilter, searchControls);
+            // Assume only one group is returned from the search.
+            returnedGroupEntry = returnedResultList.next().getName();
+        } catch (NamingException e) {
+
+            // Close the context before throwing the exception
+            JNDIUtil.closeContext(groupDirContext);
+
+            String errorMessage = "Results could not be retrieved from the directory context for user : " +
+                    context.getRoleName();
+            if (logger.isDebugEnabled()) {
+                logger.debug(errorMessage, e);
+            }
+            throw new UserStoreException(errorMessage, e);
+        } finally {
+            JNDIUtil.closeNamingEnumeration(returnedResultList);
+        }
+
         try {
             SearchControls searchCtls = new SearchControls();
             searchCtls.setSearchScope(SearchControls.SUBTREE_SCOPE);
@@ -675,10 +725,9 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
             String groupSearchBase = realmConfig.getUserStoreProperty(LDAPConstants.GROUP_SEARCH_BASE);
             String userListFilter = realmConfig.getUserStoreProperty(LDAPConstants.USER_NAME_LIST_FILTER);
             String memberOFAttribute = realmConfig.getUserStoreProperty(LDAPConstants.MEMBEROF_ATTRIBUTE);
-            String groupNameAttribute = realmConfig.getUserStoreProperty(LDAPConstants.GROUP_NAME_ATTRIBUTE);
             userSearchBase = realmConfig.getUserStoreProperty(LDAPConstants.USER_SEARCH_BASE);
-            String searchFilter = "(&" + userListFilter + "(" + memberOFAttribute + "=" + groupNameAttribute + "="
-                    + escapeSpecialCharactersForFilter(context.getRoleName()) + "," + groupSearchBase + "))";
+            String searchFilter = "(&" + userListFilter + "(" + memberOFAttribute + "="
+                    + escapeSpecialCharactersForFilter(returnedGroupEntry) + "," + groupSearchBase + "))";
             String userNameProperty = realmConfig.getUserStoreProperty(LDAPConstants.USER_NAME_ATTRIBUTE);
             String displayNameAttribute = realmConfig
                     .getUserStoreProperty(LDAPConstants.DISPLAY_NAME_ATTRIBUTE);
@@ -982,6 +1031,10 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
         setAdvancedProperty(UserStoreConfigConstants.STARTTLS_ENABLED,
                 UserStoreConfigConstants.STARTTLS_ENABLED_DISPLAY_NAME, "false",
                 UserStoreConfigConstants.STARTTLS_ENABLED_DESCRIPTION);
+        setAdvancedProperty(UserStoreConfigConstants.CONNECTION_RETRY_COUNT,
+                UserStoreConfigConstants.CONNECTION_RETRY_COUNT_DISPLAY_NAME,
+                String.valueOf(UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_COUNT),
+                UserStoreConfigConstants.CONNECTION_RETRY_COUNT_DESCRIPTION);
         setAdvancedProperty(UserStoreConfigConstants.CONNECTION_RETRY_DELAY,
                 UserStoreConfigConstants.CONNECTION_RETRY_DELAY_DISPLAY_NAME,
                 String.valueOf(UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS),
@@ -994,6 +1047,9 @@ public class ActiveDirectoryUserStoreManager extends ReadWriteLDAPUserStoreManag
         setAdvancedProperty(UserStoreConfigConstants.timestampAttributes,
                 UserStoreConfigConstants.timestampAttributesDisplayName, " ",
                 UserStoreConfigConstants.timestampAttributesDescription);
+        setAdvancedProperty(UserStoreConfigConstants.singleValuedAttributes,
+                UserStoreConfigConstants.singleValuedAttributesDisplayName, " ",
+                UserStoreConfigConstants.singleValuedAttributesDescription);
     }
 
 

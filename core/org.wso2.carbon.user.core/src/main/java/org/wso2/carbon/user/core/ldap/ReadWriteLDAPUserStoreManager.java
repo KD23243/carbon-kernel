@@ -480,10 +480,17 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
         setAdvancedProperty(UserStoreConfigConstants.STARTTLS_ENABLED,
                 UserStoreConfigConstants.STARTTLS_ENABLED_DISPLAY_NAME, "false",
                 UserStoreConfigConstants.STARTTLS_ENABLED_DESCRIPTION);
+
+        /* Added for Circuit Breaker implementation. */
+        setAdvancedProperty(UserStoreConfigConstants.CONNECTION_RETRY_COUNT,
+                UserStoreConfigConstants.CONNECTION_RETRY_COUNT_DISPLAY_NAME,
+                String.valueOf(UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_COUNT),
+                UserStoreConfigConstants.CONNECTION_RETRY_COUNT_DESCRIPTION);
         setAdvancedProperty(UserStoreConfigConstants.CONNECTION_RETRY_DELAY,
                 UserStoreConfigConstants.CONNECTION_RETRY_DELAY_DISPLAY_NAME,
                 String.valueOf(UserStoreConfigConstants.DEFAULT_CONNECTION_RETRY_DELAY_IN_MILLISECONDS),
                 UserStoreConfigConstants.CONNECTION_RETRY_DELAY_DESCRIPTION);
+
         setAdvancedProperty(UserStoreConfigConstants.SSLCertificateValidationEnabled, "Enable SSL certificate" +
                 " validation", "true", UserStoreConfigConstants.SSLCertificateValidationEnabledDescription);
         setAdvancedProperty(UserStoreConfigConstants.immutableAttributes,
@@ -842,6 +849,11 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
             }
 
         } catch (NamingException e) {
+
+            // Close the context before throwing the exception.
+            JNDIUtil.closeContext(subDirContext);
+            JNDIUtil.closeContext(dirContext);
+
             String errorMessage = "Results could not be retrieved from the directory context for user : " + userName;
 
             if (log.isDebugEnabled()) {
@@ -941,6 +953,11 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
                 handleLdapUserNameAttributeChanges(claimAttributesToReplace, subDirContext, returnedUserEntry);
             }
         } catch (NamingException e) {
+
+            // Close the context before throwing the exception.
+            JNDIUtil.closeContext(subDirContext);
+            JNDIUtil.closeContext(dirContext);
+
             String errorMessage = "Results could not be retrieved from the directory context for user : " + userName;
             if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
@@ -1039,6 +1056,10 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
             returnedUserEntry = returnedResultList.next().getName();
 
         } catch (NamingException e) {
+
+            // Close the context before throwing the exception.
+            JNDIUtil.closeContext(dirContext);
+
             String errorMessage = "Results could not be retrieved from the directory context for user : " + userName;
 
             if (log.isDebugEnabled()) {
@@ -1096,6 +1117,10 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
             returnedUserEntry = returnedResultList.next().getName();
 
         } catch (NamingException e) {
+
+            // Close the context before throwing the exception.
+            JNDIUtil.closeContext(dirContext);
+
             String errorMessage = "Results could not be retrieved from the directory context for user : " + userName;
             if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
@@ -1155,6 +1180,10 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
             returnedUserEntry = returnedResultList.next().getName();
 
         } catch (NamingException e) {
+
+            // Close the context before throwing the exception.
+            JNDIUtil.closeContext(dirContext);
+
             String errorMessage = "Results could not be retrieved from the directory context for user : " + userName;
             if (log.isDebugEnabled()) {
                 log.debug(errorMessage, e);
@@ -1461,14 +1490,13 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
                                             searchBase);
                             // assume only one group with given group name
                             //TODO - https://github.com/wso2/product-is/issues/11925
-                            String groupDN = "cn=" + newRole;
                             if (!groupResults.hasMore()) {
-                                modifyUserInRole(userNameDN, groupDN, DirContext.ADD_ATTRIBUTE,
+                                modifyUserInRoleWithRecursiveSearch(userNameDN, newRole, DirContext.ADD_ATTRIBUTE,
                                         searchBase);
                             } else {
                                 errorMessage =
                                         "User: " + userName + " already belongs to role: " +
-                                                groupDN;
+                                                newRole;
                                 throw new UserStoreException(errorMessage);
                             }
 
@@ -1742,7 +1770,71 @@ public class ReadWriteLDAPUserStoreManager extends ReadOnlyLDAPUserStoreManager 
         }
     }
 
+    /**
+     * Either delete or add user from/to group while recursively checking in the sub-directory paths.
+     *
+     * @param userNameDN : distinguish name of user entry.
+     * @param groupRDN   : relative distinguish name of group entry
+     * @param modifyType : modify attribute type in DirCOntext.
+     * @throws UserStoreException
+     */
+    protected void modifyUserInRoleWithRecursiveSearch(String userNameDN, String groupRDN, int modifyType,
+                                                       String searchBase) throws UserStoreException {
 
+        if (log.isDebugEnabled()) {
+            logger.debug("Modifying role: " + groupRDN + " with type: " + modifyType + " user: " + userNameDN
+                    + " in search base: " + searchBase);
+        }
+        DirContext dirContext = this.connectionSource.getContext();
+        SearchControls searchControls = new SearchControls();
+        searchControls.setSearchScope(SearchControls.SUBTREE_SCOPE);
+        searchControls.setReturningAttributes(null);
+        String groupSearchFilter = realmConfig
+                .getUserStoreProperty(LDAPConstants.ROLE_NAME_FILTER);
+        groupSearchFilter = groupSearchFilter.replace("?", escapeSpecialCharactersForFilter(groupRDN));
+        NamingEnumeration<SearchResult> returnedResultList = null;
+        String returnedGroupEntry;
+        try {
+            returnedResultList = dirContext.search(escapeDNForSearch(groupSearchBase),
+                    groupSearchFilter, searchControls);
+            // Assume only one group is returned from the search.
+            returnedGroupEntry = returnedResultList.next().getName();
+        } catch (NamingException e) {
+            String errorMessage = "Results could not be retrieved from the directory context for group : " + groupRDN;
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            throw new UserStoreException(errorMessage, e);
+        } finally {
+            JNDIUtil.closeNamingEnumeration(returnedResultList);
+        }
+        DirContext mainDirContext = null;
+        DirContext groupContext = null;
+        try {
+            mainDirContext = this.connectionSource.getContext();
+            groupContext = (DirContext) mainDirContext.lookup(escapeDNForSearch(searchBase));
+            String memberAttributeName = realmConfig.getUserStoreProperty(LDAPConstants.MEMBERSHIP_ATTRIBUTE);
+            Attributes modifyingAttributes = new BasicAttributes(true);
+            Attribute memberAttribute = new BasicAttribute(memberAttributeName);
+            memberAttribute.add(userNameDN);
+            modifyingAttributes.put(memberAttribute);
+            groupContext.modifyAttributes(returnedGroupEntry, modifyType, modifyingAttributes);
+            if (log.isDebugEnabled()) {
+                logger.debug("User: " + userNameDN + " was successfully " + "modified in LDAP group: "
+                        + groupRDN);
+            }
+        } catch (NamingException e) {
+            String errorMessage = "Error occurred while modifying user entry: " + userNameDN
+                    + " in LDAP role: " + groupRDN;
+            if (log.isDebugEnabled()) {
+                log.debug(errorMessage, e);
+            }
+            throw new UserStoreException(errorMessage);
+        } finally {
+            JNDIUtil.closeContext(groupContext);
+            JNDIUtil.closeContext(mainDirContext);
+        }
+    }
 
 
     /**

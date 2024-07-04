@@ -246,6 +246,10 @@ do
     CARBON_CLASSPATH="$CARBON_CLASSPATH":$t
 done
 
+# Add the openssl.conf
+if [ -f "$CARBON_HOME/repository/resources/conf/templates/repository/conf/tomcat/openssl.cnf.j2" ]; then
+    export OPENSSL_CONF="$CARBON_HOME/repository/conf/tomcat/openssl.cnf"
+fi
 
 # For Cygwin, switch paths to Windows format before running java
 if $cygwin; then
@@ -284,7 +288,7 @@ echo "Using Java memory options: $JVM_MEM_OPTS"
 #To monitor a Carbon server in remote JMX mode on linux host machines, set the below system property.
 #   -Djava.rmi.server.hostname="your.IP.goes.here"
 
-JAVA_VER_BASED_OPTS="--add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens java.rmi/sun.rmi.transport=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED"
+JAVA_VER_BASED_OPTS="--add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens java.rmi/sun.rmi.transport=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.xml/com.sun.org.apache.xerces.internal.dom=ALL-UNNAMED --add-opens=java.base/sun.security.x509=ALL-UNNAMED"
 
 if [ $java_version_formatted -ge 1700 ]; then
     JAVA_VER_BASED_OPTS=$JAVA_VER_BASED_OPTS" --add-opens=java.naming/com.sun.jndi.ldap=ALL-UNNAMED"
@@ -308,6 +312,7 @@ do
     -Dcarbon.registry.root=/ \
     -Djava.command="$JAVACMD" \
     -Dcarbon.home="$CARBON_HOME" \
+    -Djava.library.path="$CARBON_HOME/lib" \
     -Djava.util.logging.manager=org.apache.juli.ClassLoaderLogManager \
     -Dcarbon.config.dir.path="$CARBON_HOME/repository/conf" \
     -Djava.util.logging.config.file="$CARBON_HOME/repository/conf/etc/logging-bridge.properties" \
@@ -319,10 +324,14 @@ do
     -Dorg.apache.jasper.runtime.BodyContentImpl.LIMIT_BUFFER=true \
     -Dcom.sun.jndi.ldap.connect.pool.authentication=simple  \
     -Dcom.sun.jndi.ldap.connect.pool.timeout=3000  \
+    -Dcom.sun.jndi.ldap.connect.pool.protocol="plain ssl" \
     -Dorg.terracotta.quartz.skipUpdateCheck=true \
     -Djava.security.egd=file:/dev/./urandom \
     -Dfile.encoding=UTF8 \
     -Djava.net.preferIPv4Stack=true \
+    -Djdk.util.zip.disableZip64ExtraFieldValidation=true \
+    -Djavax.xml.parsers.DocumentBuilderFactory=org.apache.xerces.jaxp.DocumentBuilderFactoryImpl \
+    -Djdk.nio.zipfs.allowDotZipEntry=true \
     -Dcom.ibm.cacheLocalHost=true \
     -DworkerNode=false \
     -DenableCorrelationLogs=false \

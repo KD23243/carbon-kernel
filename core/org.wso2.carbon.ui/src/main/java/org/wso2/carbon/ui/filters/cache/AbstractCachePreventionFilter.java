@@ -47,6 +47,11 @@ import org.apache.commons.logging.LogFactory;
  *
  * @since 4.2.0
  */
+
+/**
+ * @deprecated This class is moved to org.wso2.carbon.tomcat.ext
+ */
+@Deprecated
 public abstract class AbstractCachePreventionFilter implements Filter {
 
     private static Log log = LogFactory.getLog(AbstractCachePreventionFilter.class);

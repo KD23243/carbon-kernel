@@ -17,11 +17,15 @@
  */
 package org.wso2.carbon.user.core.common;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
+import org.wso2.carbon.user.api.UserStoreManager;
+import org.wso2.carbon.user.core.UserCoreConstants;
 import org.wso2.carbon.user.core.UserStoreException;
-import org.wso2.carbon.utils.xml.StringUtils;
+import org.wso2.carbon.user.core.service.RealmService;
+import org.wso2.carbon.user.core.util.UserCoreUtil;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -31,6 +35,10 @@ import javax.cache.Cache;
 import javax.cache.CacheManager;
 import javax.cache.Caching;
 import javax.sql.DataSource;
+
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.RESOLVE_USER_NAME_FROM_UNIQUE_USER_ID_CACHE_NAME;
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.RESOLVE_USER_NAME_FROM_USER_ID_CACHE_NAME;
+import static org.wso2.carbon.utils.multitenancy.MultitenantConstants.SUPER_TENANT_ID;
 
 /**
  * Purpose of this class is to keep a mapping between user unique id and the domain of that user to reduce the
@@ -45,6 +53,8 @@ public class UserUniqueIDDomainResolver {
     private static final String UNIQUE_ID_DOMAIN_RESOLVER_CACHE_MANGER_NAME = "unique_id_domain_cache_manager";
     private static final String UNIQUE_ID_DOMAIN_RESOLVER_CACHE_NAME = "unique_id_domain_cache";
     private static final String DOMAIN_COLUMN_NAME = "UM_DOMAIN_NAME";
+    // MAX_RETRY_TIME will be constant and not configurable since getDomainForUserId will not fail on second attempt.
+    private static final int MAX_RETRY_TIME = 2;
 
     // DB related.
     private DataSource dataSource;
@@ -66,6 +76,10 @@ public class UserUniqueIDDomainResolver {
             "WHERE UM_DOMAIN_ID = (SELECT UM_DOMAIN_ID " +
             "FROM UM_UUID_DOMAIN_MAPPER " +
             "WHERE UM_USER_ID = ? AND UM_TENANT_ID = ?)";
+
+    private static final String DELETE_DOMAIN =
+            "DELETE FROM UM_UUID_DOMAIN_MAPPER " +
+                    "WHERE UM_DOMAIN_ID = (SELECT UM_DOMAIN_ID FROM UM_DOMAIN WHERE UM_DOMAIN_NAME = ? AND UM_TENANT_ID = ?) AND UM_USER_ID = ? AND UM_TENANT_ID = ?";
 
     public UserUniqueIDDomainResolver(DataSource dataSource) {
 
@@ -95,28 +109,43 @@ public class UserUniqueIDDomainResolver {
 
             // Read the cache first.
             String domainName = uniqueIdDomainCache.get(userId);
-            if (domainName != null) {
+
+            if (StringUtils.isBlank(domainName)) {
                 if (log.isDebugEnabled()) {
-                    log.debug("Cache hit for user id: " + userId);
+                    log.debug("Cache miss for user id: " + userId + " searching from the database.");
                 }
-                return domainName;
+
+                // Read the domain name from the Database;
+                domainName = getDomainFromDB(userId, tenantId);
+
+                // Update the cache.
+                if (StringUtils.isNotBlank(domainName)) {
+                    uniqueIdDomainCache.put(userId, domainName);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Domain with name: " + domainName + " retrieved from the database.");
+                    }
+                }
             }
-
-            if (log.isDebugEnabled()) {
-                log.debug("Cache miss for user id: " + userId + " searching from the database.");
-            }
-
-            // Read the domain name from the Database;
-            domainName = getDomainFromDB(userId, tenantId);
-
-            // Update the cache.
-            if (domainName != null) {
-                uniqueIdDomainCache.put(userId, domainName);
-                if (log.isDebugEnabled()) {
-                    log.debug("Domain with name: " + domainName + " retrieved from the database.");
+            if (StringUtils.isNotBlank(domainName) &&
+                    !UserCoreConstants.PRIMARY_DEFAULT_DOMAIN_NAME.equals(domainName)) {
+                RealmService realmService = UserCoreUtil.getRealmService();
+                UserStoreManager userStoreManager = null;
+                if (realmService != null) {
+                    userStoreManager = ((AbstractUserStoreManager) realmService.getTenantUserRealm(tenantId)
+                            .getUserStoreManager()).getSecondaryUserStoreManager(domainName);
+                }
+                if (userStoreManager == null) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Entry is outdated. Clearing cache and the database entries.");
+                    }
+                    deleteDomainFromDB(domainName, userId, tenantId);
+                    clearUserIDResolverCache(userId, tenantId);
+                    domainName = null;
                 }
             }
             return domainName;
+        } catch (org.wso2.carbon.user.api.UserStoreException e) {
+            throw new UserStoreException("Tenant user realm  cannot be resolved for tenantId: " + tenantId, e);
         } finally {
             PrivilegedCarbonContext.endTenantFlow();
         }
@@ -159,6 +188,39 @@ public class UserUniqueIDDomainResolver {
             }
         } finally {
             PrivilegedCarbonContext.endTenantFlow();
+        }
+    }
+
+    /**
+     * Set the domain for the user id if the domain is not retrieved from getDomainForUserId. In case of SQLException,
+     * tries MAX_RETRY_TIME to set the user domain.
+     *
+     * @param userId     Unique user id of the user.
+     * @param userDomain Domain to be set.
+     * @param tenantId   Tenant Id if the user.
+     * @throws UserStoreException If an error occurs.
+     */
+    public void setDomainForUserIdIfNotExists(String userId, String userDomain, int tenantId)
+            throws UserStoreException {
+
+        for (int retryTimes = 0; retryTimes < MAX_RETRY_TIME; retryTimes++) {
+            try {
+                String retrievedUserDomain = getDomainForUserId(userId, tenantId);
+                if (!StringUtils.isEmpty(retrievedUserDomain)) {
+                    return;
+                }
+                setDomainForUserId(userId, userDomain, tenantId);
+                return;
+            } catch (UserStoreException e) {
+                if (!(e.getCause() instanceof SQLException) || retryTimes == MAX_RETRY_TIME - 1) {
+                    throw e;
+                }
+                if (log.isDebugEnabled()) {
+                    log.debug(String.format(
+                            "Error while setting the domain for user ID: %s on try: %d. Retrying to set the domain.",
+                            userId, retryTimes + 1), e);
+                }
+            }
         }
     }
 
@@ -271,6 +333,28 @@ public class UserUniqueIDDomainResolver {
             }
         } catch (SQLException e) {
             log.error("An error occurred while transaction rollback.", e);
+        }
+    }
+
+    private void clearUserIDResolverCache(String userId, int tenantId) {
+
+        UserIdResolverCache.getInstance().clearCacheEntry(userId, RESOLVE_USER_NAME_FROM_USER_ID_CACHE_NAME, tenantId);
+        UserIdResolverCache.getInstance()
+                .clearCacheEntry(userId, RESOLVE_USER_NAME_FROM_UNIQUE_USER_ID_CACHE_NAME, SUPER_TENANT_ID);
+    }
+
+    private void deleteDomainFromDB(String userDomain, String userId, int tenantId) throws UserStoreException {
+
+        try (Connection dbConnection = getDBConnection();
+             PreparedStatement preparedStatement = dbConnection.prepareStatement(DELETE_DOMAIN)) {
+            preparedStatement.setString(1, userDomain);
+            preparedStatement.setInt(2, tenantId);
+            preparedStatement.setString(3, userId);
+            preparedStatement.setInt(4, tenantId);
+            preparedStatement.execute();
+            commitTransaction(dbConnection);
+        } catch (SQLException ex) {
+            throw new UserStoreException("Error occurred while deleting the domain name for user id from database.", ex);
         }
     }
 }

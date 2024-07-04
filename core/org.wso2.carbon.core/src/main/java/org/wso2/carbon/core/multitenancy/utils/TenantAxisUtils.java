@@ -58,6 +58,7 @@ import org.wso2.carbon.core.util.Utils;
 import org.wso2.carbon.registry.core.session.UserRegistry;
 import org.wso2.carbon.user.core.tenant.Tenant;
 import org.wso2.carbon.user.core.tenant.TenantManager;
+import org.wso2.carbon.user.core.util.DatasourceDataHolder;
 import org.wso2.carbon.utils.Axis2ConfigurationContextObserver;
 import org.wso2.carbon.utils.CarbonUtils;
 import org.wso2.carbon.utils.ServerConstants;
@@ -455,9 +456,21 @@ public final class TenantAxisUtils {
                                 PrivilegedCarbonContext carbonContext = PrivilegedCarbonContext.getThreadLocalCarbonContext();
                                 carbonContext.setTenantDomain(tenantDomain, true);
 
-                                // Terminating idle tenant configuration contexts.
-                                terminateTenantConfigContext(tenantCfgCtx);
+                                if (MultitenantConstants.INVALID_TENANT_ID != carbonContext.getTenantId()) {
+                                    // Terminating idle tenant configuration contexts.
+                                    terminateTenantConfigContext(tenantCfgCtx);
+                                } else {
+                                    if (log.isDebugEnabled()) {
+                                        log.debug("Tenant ID of tenant domain " + tenantDomain + " can't be " +
+                                                "resolved. This tenant may be deleted. So skipping the tenant " +
+                                                "unloading part.");
+                                    }
+                                }
                                 tenantConfigContexts.remove(tenantDomain);
+                                // removing cached datasources of the domain
+                                DatasourceDataHolder.removeDatasourcesOfTenant(getTenantId(tenantDomain));
+                            } catch (Exception e) {
+                                log.error("Error occurred while fetching the tenant details");
                             } finally {
                                 PrivilegedCarbonContext.endTenantFlow();
                             }

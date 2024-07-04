@@ -59,6 +59,7 @@ public class DatabaseUtil {
     private static final String VALIDATION_INTERVAL = "validationInterval";
     private static final long DEFAULT_VALIDATION_INTERVAL = 30000;
     private static final String SQL_STATEMENT_PARAMETER_PLACEHOLDER = "?";
+    private static final String SQL_STATEMENT_PARAMETER_SEPARATOR = ",";
     private static final String DISABLED = "Disabled";
     public static final String JDBC_INTERCEPTOR_SEPARATOR = ";";
     private static final String DEFAULT_CORRELATION_LOG_INTERCEPTOR = "org.wso2.carbon.ndatasource.rdbms"
@@ -262,11 +263,6 @@ public class DatabaseUtil {
                 !realmConfig.getUserStoreProperty(JDBCRealmConstants.CONNECTION_PROPERTIES).trim().isEmpty()) {
             poolProperties.setConnectionProperties(realmConfig.getUserStoreProperty(JDBCRealmConstants
                     .CONNECTION_PROPERTIES));
-        }
-
-        if (StringUtils.isNotEmpty(realmConfig.getUserStoreProperty(JDBCRealmConstants.INIT_SQL)) &&
-                !realmConfig.getUserStoreProperty(JDBCRealmConstants.INIT_SQL).trim().isEmpty()) {
-            poolProperties.setInitSQL(realmConfig.getUserStoreProperty(JDBCRealmConstants.INIT_SQL));
         }
 
         if (StringUtils.isNotEmpty(realmConfig.getUserStoreProperty(JDBCRealmConstants.JDBC_INTERCEPTORS)) &&
@@ -499,11 +495,6 @@ public class DatabaseUtil {
                 !realmConfig.getRealmProperty(JDBCRealmConstants.CONNECTION_PROPERTIES).trim().isEmpty()) {
             poolProperties.setConnectionProperties(realmConfig.getRealmProperty(JDBCRealmConstants
                     .CONNECTION_PROPERTIES));
-        }
-
-        if (StringUtils.isNotEmpty(realmConfig.getRealmProperty(JDBCRealmConstants.INIT_SQL)) &&
-                !realmConfig.getRealmProperty(JDBCRealmConstants.INIT_SQL).trim().isEmpty()) {
-            poolProperties.setInitSQL(realmConfig.getRealmProperty(JDBCRealmConstants.INIT_SQL));
         }
 
         if (StringUtils.isNotEmpty(realmConfig.getRealmProperty(JDBCRealmConstants.JDBC_INTERCEPTORS)) &&
@@ -1007,11 +998,38 @@ public class DatabaseUtil {
             }
             dbConnection.commit();
         } catch (SQLException e) {
-            String errorMessage = "Using sql : " + sqlStmt + " " + e.getMessage();
-            if (log.isDebugEnabled()) {
-                log.debug(errorMessage, e);
+            boolean isUniqueKeyViolationException = false;
+            for (Throwable subSQLException : e) {
+                if (subSQLException instanceof SQLIntegrityConstraintViolationException ||
+                        StringUtils.containsIgnoreCase(e.getMessage(),
+                                "um_user_role_um_user_id_um_role_id_um_tenant_id_key")) {
+                    // If concurrent requests bypass the existing user validation check, it can throw an exception
+                    // regarding unique key violation. Hence, we need to handle this exception and continue.
+                    isUniqueKeyViolationException = true;
+                    if (log.isDebugEnabled()) {
+                        log.debug("Similar entry found when adding the user to the role. Hence skipping " +
+                                "the user addition", e);
+                    }
+                    try {
+                        dbConnection.commit();
+                    } catch (SQLException ex) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Error while committing transaction to the database.", e);
+                        }
+                        throw new UserStoreException(ex.getMessage(), ex);
+                    }
+                    break;
+                }
             }
-            throw new UserStoreException(errorMessage, e);
+            if (isUniqueKeyViolationException) {
+                throw new UserStoreException(e.getMessage(), ERROR_CODE_DUPLICATE_WHILE_WRITING_TO_DATABASE.getCode(), e);
+            } else {
+                String errorMessage = "Using sql : " + sqlStmt + " " + e.getMessage();
+                if (log.isDebugEnabled()) {
+                    log.debug(errorMessage, e);
+                }
+                throw new UserStoreException(errorMessage, e);
+            }
         } finally {
             if (localConnection) {
                 DatabaseUtil.closeAllConnections(dbConnection);
@@ -1251,5 +1269,26 @@ public class DatabaseUtil {
             jdbcInterceptors = jdbcInterceptors + JDBC_INTERCEPTOR_SEPARATOR + DEFAULT_CORRELATION_LOG_INTERCEPTOR;
         }
         poolProperties.setJdbcInterceptors(jdbcInterceptors);
+    }
+
+
+    /**
+     * Build a dynamic parameter string for dynamic length queries.
+     *
+     * @param repetitiveItem Item to be repeated in the string.
+     * @param iterationCount Iteration count.
+     * @return Dynamic parameter string.
+     */
+    public static String buildDynamicParameterString(String repetitiveItem, int iterationCount) {
+
+        StringBuilder dynamicString = new StringBuilder();
+        if (iterationCount > 0) {
+            for (int i = 0; i < iterationCount - 1; i++) {
+                dynamicString.append(repetitiveItem).append(SQL_STATEMENT_PARAMETER_SEPARATOR);
+            }
+            dynamicString.append(repetitiveItem);
+        }
+
+        return dynamicString.toString();
     }
 }

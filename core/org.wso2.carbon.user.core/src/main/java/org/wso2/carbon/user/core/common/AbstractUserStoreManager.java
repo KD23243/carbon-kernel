@@ -1,12 +1,12 @@
 /*
- *  Copyright (c) (2005-2021), WSO2 Inc. (http://www.wso2.org) All Rights Reserved.
+ * Copyright (c) 2005-2024, WSO2 LLC. (http://www.wso2.com).
  *
- *  WSO2 Inc. licenses this file to you under the Apache License,
- *  Version 2.0 (the "License"); you may not use this file except
- *  in compliance with the License.
- *  You may obtain a copy of the License at
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ * You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ * http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
@@ -17,6 +17,7 @@
  */
 package org.wso2.carbon.user.core.common;
 
+import java.util.Objects;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections.MapUtils;
 import org.apache.commons.lang.ArrayUtils;
@@ -24,8 +25,10 @@ import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.CarbonConstants;
+import org.wso2.carbon.base.ServerConfiguration;
 import org.wso2.carbon.context.CarbonContext;
 import org.wso2.carbon.user.api.RealmConfiguration;
+import org.wso2.carbon.user.core.CircuitBreakerOpenException;
 import org.wso2.carbon.user.core.NotImplementedException;
 import org.wso2.carbon.user.core.PaginatedUserStoreManager;
 import org.wso2.carbon.user.core.Permission;
@@ -52,7 +55,6 @@ import org.wso2.carbon.user.core.internal.UserStoreMgtDSComponent;
 import org.wso2.carbon.user.core.internal.UserStoreMgtDataHolder;
 import org.wso2.carbon.user.core.jdbc.JDBCUserStoreManager;
 import org.wso2.carbon.user.core.ldap.LDAPConstants;
-import org.wso2.carbon.user.core.ldap.ReadWriteLDAPUserStoreManager;
 import org.wso2.carbon.user.core.listener.GroupResolver;
 import org.wso2.carbon.user.core.listener.GroupManagementErrorEventListener;
 import org.wso2.carbon.user.core.listener.GroupOperationEventListener;
@@ -77,6 +79,7 @@ import org.wso2.carbon.user.core.service.RealmService;
 import org.wso2.carbon.user.core.system.SystemUserRoleManager;
 import org.wso2.carbon.user.core.util.UserCoreUtil;
 import org.wso2.carbon.utils.Secret;
+import org.wso2.carbon.utils.ServerConstants;
 import org.wso2.carbon.utils.UnsupportedSecretTypeException;
 import org.wso2.carbon.utils.multitenancy.MultitenantUtils;
 
@@ -109,6 +112,7 @@ import static org.wso2.carbon.user.core.UserCoreConstants.DOMAIN_SEPARATOR;
 import static org.wso2.carbon.user.core.UserCoreConstants.INTERNAL_DOMAIN;
 import static org.wso2.carbon.user.core.UserCoreConstants.INTERNAL_SYSTEM_ROLE_PREFIX;
 import static org.wso2.carbon.user.core.UserCoreConstants.INTERNAL_ROLES_CLAIM;
+import static org.wso2.carbon.user.core.UserCoreConstants.PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE;
 import static org.wso2.carbon.user.core.UserCoreConstants.ROLE_CLAIM;
 import static org.wso2.carbon.user.core.UserCoreConstants.SYSTEM_DOMAIN_NAME;
 import static org.wso2.carbon.user.core.UserCoreConstants.USER_STORE_GROUPS_CLAIM;
@@ -117,6 +121,7 @@ import static org.wso2.carbon.user.core.UserStoreConfigConstants.RESOLVE_USER_ID
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.RESOLVE_USER_NAME_FROM_UNIQUE_USER_ID_CACHE_NAME;
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.RESOLVE_USER_NAME_FROM_USER_ID_CACHE_NAME;
 import static org.wso2.carbon.user.core.UserStoreConfigConstants.RESOLVE_USER_UNIQUE_ID_FROM_USER_NAME_CACHE_NAME;
+import static org.wso2.carbon.user.core.constants.UserCoreClaimConstants.USER_ID_CLAIM_URI;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_ADDING_A_HYBRID_ROLE;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_ADDING_A_SYSTEM_ROLE;
 import static org.wso2.carbon.user.core.constants.UserCoreErrorConstants.ErrorMessages.ERROR_CODE_DUPLICATE_WHILE_ADDING_A_SYSTEM_USER;
@@ -168,7 +173,11 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     private static final String PROPERTY_PASSWORD_ERROR_MSG = "PasswordJavaRegExViolationErrorMsg";
     private static final String MULTI_ATTRIBUTE_SEPARATOR = "MultiAttributeSeparator";
     private static final String LOCATION_CLAIM_URI = "http://wso2.org/claims/location";
+    private static final String CREATED_CLAIM_URI = "http://wso2.org/claims/created";
+    private static final String MODIFIED_CLAIM_URI = "http://wso2.org/claims/modified";
     private static Log log = LogFactory.getLog(AbstractUserStoreManager.class);
+    private static final int DEFAULT_PASSWORD_VALIDITY_PERIOD_VALUE = 24;
+    protected static int pwValidityTimeoutInt = getDefaultPasswordValidityPeriodInHours();
     protected int tenantId;
     protected DataSource dataSource = null;
     protected RealmConfiguration realmConfig = null;
@@ -185,7 +194,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     private boolean userRolesCacheEnabled = true;
     private String cacheIdentifier;
     private boolean replaceEscapeCharactersAtUserLogin = true;
-    private Map<String, UserStoreManager> userStoreManagerHolder = new HashMap<String, UserStoreManager>();
+    protected Map<String, UserStoreManager> userStoreManagerHolder = new HashMap<String, UserStoreManager>();
     private Map<String, Integer> maxUserListCount = null;
     private Map<String, Integer> maxRoleListCount = null;
     private List<UserStoreManagerConfigurationListener> listener = new ArrayList<UserStoreManagerConfigurationListener>();
@@ -197,7 +206,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     };
 
     private UserUniqueIDManger userUniqueIDManger = new UserUniqueIDManger();
-    private UserUniqueIDDomainResolver userUniqueIDDomainResolver;
+    protected UserUniqueIDDomainResolver userUniqueIDDomainResolver;
     private GroupUniqueIDDomainResolver groupUniqueIDDomainResolver;
 
     private void setClaimManager(ClaimManager claimManager) throws IllegalAccessException {
@@ -246,7 +255,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 String errorMessage = e.getCause().getCause().getMessage();
                 if (isClientException) {
                     if (StringUtils.isBlank(errorCode)) {
-                        throw new UserStoreClientException(errorCode, e);
+                        throw new UserStoreClientException(errorMessage, e);
                     }
                     throw new UserStoreClientException(errorMessage, errorCode, e);
                 } else {
@@ -843,6 +852,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 log.debug(errorMessage, e);
             }
 
+            if (e instanceof UserStoreClientException) {
+                throw new UserStoreClientException(errorMessage, e);
+            }
             throw new UserStoreException(errorMessage, e);
         }
         return userStoreAttributeValueMap;
@@ -1326,6 +1338,128 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
     }
 
+    /**
+     * Update the name of the group with id.
+     *
+     * @param groupId   Group ID.
+     * @param newGroupName New group name.
+     * @throws UserStoreException If an error occurred while updating the group name.
+     */
+    protected void doUpdateGroupNameByGroupId(String groupId, String newGroupName) throws UserStoreException {
+
+        throw new NotImplementedException(
+                "doUpdateGroupNameByGroupId operation is not implemented in: " + this.getClass());
+    }
+
+    /**
+     * Update the name of the group with the given group name.
+     *
+     * @param currentGroupName Current name of the group that needs to be updated.
+     * @param newGroupName     New name of the group.
+     * @throws UserStoreException If an error occurred while updating the group name.
+     */
+    protected void doUpdateGroupName(String currentGroupName, String newGroupName)
+            throws UserStoreException {
+
+        // Overriding method to maintain backward compatibility.
+        doUpdateRoleName(currentGroupName, newGroupName);
+    }
+
+    /**
+     * Generate unique identifier for the group.
+     *
+     * @return
+     */
+    protected String generateGroupUUID() {
+
+        return UUID.randomUUID().toString();
+    }
+
+    /**
+     * Add group with a list of users and claims provided.
+     *
+     * @param groupName Name of the group.
+     * @param groupId   Group ID.
+     * @param userIds   User IDs list.
+     * @param claims    Claims.
+     * @return Group object.
+     * @throws UserStoreException If an error occurred while adding the group.
+     */
+    protected Group doAddGroup(String groupName, String groupId, List<String> userIds, Map<String, String> claims)
+            throws UserStoreException {
+
+        throw new NotImplementedException("doAddGroup operation is not implemented in: " + this.getClass());
+    }
+
+    /**
+     * Add group with the group name and the user list. NOTE: Implement this if user store DOES NOT have the
+     * capability to manage group related attributes such group id, created timestamp, modified timestamp etc and
+     * user store DOES SUPPORT user unique IDs.
+     *
+     * @param groupName Name of the group.
+     * @param userIds   User id list.
+     * @throws UserStoreException If an error occurred while adding the group.
+     */
+    protected void doAddGroupWithUserIds(String groupName, List<String> userIds) throws UserStoreException {
+
+        // No need to have a return since the user store is unable to manage group related attributes. Therefore, from
+        // the user store level there is only the name that can return, and it is already there in the parameters.
+        doAddRoleWithID(groupName, userIds.toArray(new String[0]), false);
+    }
+
+    /**
+     * Add group with the group name and the usernames list. NOTE: Implement this if user store DOES NOT HAVE the
+     * capability to manage group related attributes such group id, created timestamp, modified timestamp etc and
+     * user store DOES NOT SUPPORT user unique IDs.
+     *
+     * @param groupName Name of the group.
+     * @param userNames User name list.
+     * @throws UserStoreException If an error occurred while adding the group.
+     */
+    protected void doAddGroupWithUserNames(String groupName, List<String> userNames) throws UserStoreException {
+
+        // No need to have a return since the user store is unable to manage group related attributes. Therefore, from
+        // the user store level there is only the name that can return and it is already there in the parameters.
+        doAddRole(groupName, userNames.toArray(new String[0]), false);
+    }
+
+    /**
+     * Delete group with the given group groupID.
+     *
+     * @param groupId Group Id.
+     * @throws UserStoreException If an error occurred while deleting the group.
+     */
+    protected void doDeleteGroupByGroupId(String groupId) throws UserStoreException {
+
+        throw new NotImplementedException("doDeleteGroupByGroupID operation is not implemented in: " + this.getClass());
+    }
+
+    /**
+     * Delete group with the given group name.
+     *
+     * @param groupName Group name.
+     * @throws UserStoreException If an error occurred while deleting the group.
+     */
+    protected void doDeleteGroupByGroupName(String groupName) throws UserStoreException {
+
+        // Overriding method to maintain backward compatibility.
+        doDeleteRole(UserCoreUtil.removeDomainFromName(groupName));
+    }
+
+    /**
+     * Update the user list of a group.
+     *
+     * @param groupId        Group ID.
+     * @param deletedUserIds User IDs list to be deleted.
+     * @param newUserIds     User IDs list to be added.
+     * @throws UserStoreException If an error occurred while updating the user list of the group.
+     */
+    protected void doUpdateUserListOfGroup(String groupId, List<String> deletedUserIds, List<String> newUserIds)
+            throws UserStoreException {
+
+        throw new NotImplementedException(
+                "doUpdateUserListOfGroup operation is not implemented in: " + this.getClass());
+    }
 
     /**
      * delete the role.
@@ -1675,7 +1809,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
                 if (!listener.authenticate(userName, credentialArgument, abstractUserStoreManager)) {
                     handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                            ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(), userName,
+                            String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+                            StringUtils.EMPTY), userName,
                             credentialArgument);
                     return false;
                 }
@@ -1690,13 +1825,22 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     } else {
                         credentialArgument = credential;
                     }
-
-                    if (!listener.doPreAuthenticate(userName, credentialArgument, abstractUserStoreManager)) {
-                        handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_PRE_AUTHENTICATION.getCode(),
-                                String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_PRE_AUTHENTICATION.getMessage(),
-                                        UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), userName,
-                                credentialArgument);
-                        return false;
+                    try {
+                        if (!listener.doPreAuthenticate(userName, credentialArgument, abstractUserStoreManager)) {
+                            handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_PRE_AUTHENTICATION.getCode(),
+                                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_PRE_AUTHENTICATION.getMessage(),
+                                            UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), userName,
+                                    credentialArgument);
+                            return false;
+                        }
+                    /* Added for compatibility with old pre-listeners. */
+                    } catch (CircuitBreakerOpenException circuitBreakerOpenEx) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Circuit Breaker is in open state for " + userStore.getDomainName()
+                                    + " domain. Hence ignore the userstore and proceed", circuitBreakerOpenEx);
+                        }
+                        log.error("Error occurred while obtaining user store connection for: "
+                                + userStore.getDomainName());
                     }
                 }
             } catch (UserStoreException ex) {
@@ -1733,17 +1877,25 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             // We are here due to two reason. Either there is no secondary UserStoreManager or no
             // domain name provided with user name.
             try {
-                // Let's authenticate with the primary UserStoreManager.
-                if (abstractUserStoreManager.isUniqueUserIdEnabled()) {
-                    String userNameProperty = abstractUserStoreManager.getUsernameProperty();
-                    AuthenticationResult authenticationResult = abstractUserStoreManager
-                            .doAuthenticateWithID(userNameProperty, userName, credential, null);
-                    if (authenticationResult.getAuthenticationStatus()
-                            == AuthenticationResult.AuthenticationStatus.SUCCESS) {
-                        authenticated = true;
+                // Validate whether circuit breaker is enabled and open.
+                if (isCircuitBreakerEnabledAndOpen()) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Avoiding searching the " + abstractUserStoreManager.getMyDomainName()
+                                + " domain as Circuit Breaker is in open state");
                     }
                 } else {
-                    authenticated = abstractUserStoreManager.doAuthenticate(userName, credentialObj);
+                    // Let's authenticate with the primary UserStoreManager.
+                    if (abstractUserStoreManager.isUniqueUserIdEnabled()) {
+                        String userNameProperty = abstractUserStoreManager.getUsernameProperty();
+                        AuthenticationResult authenticationResult = abstractUserStoreManager
+                                .doAuthenticateWithID(userNameProperty, userName, credential, null);
+                        if (authenticationResult.getAuthenticationStatus()
+                                == AuthenticationResult.AuthenticationStatus.SUCCESS) {
+                            authenticated = true;
+                        }
+                    } else {
+                        authenticated = abstractUserStoreManager.doAuthenticate(userName, credentialObj);
+                    }
                 }
             } catch (Exception e) {
                 handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
@@ -1758,9 +1910,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     throw (UserStoreClientException) e;
                 }
                 log.error("Error occurred while authenticating user: " + userName, e);
-                authenticated = false;
             }
-
         } finally {
             credentialObj.clear();
         }
@@ -1786,8 +1936,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
 
         if (!authenticated) {
-            handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+            handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getCode(),
+                    String.format(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getMessage(),
                             "Authentication failed"), userName, credential);
         }
 
@@ -1802,10 +1952,20 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 }
             }
         } catch (UserStoreException ex) {
-            handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_POST_AUTHENTICATION.getCode(),
-                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_POST_AUTHENTICATION.getMessage(),
-                            ex.getMessage()), userName, credential);
-            throw ex;
+            /* Added for compatibility with old pre-listeners. */
+            if (ex instanceof CircuitBreakerOpenException) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Circuit Breaker is in open state for " + userStore.getDomainName()
+                            + " domain. Hence ignore the userstore and proceed", ex);
+                }
+                log.error("Error occurred while obtaining user store connection for: "
+                        + userStore.getDomainName());
+            } else {
+                handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_POST_AUTHENTICATION.getCode(),
+                        String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_POST_AUTHENTICATION.getMessage(),
+                                ex.getMessage()), userName, credential);
+                throw ex;
+            }
         }
 
         if (log.isDebugEnabled()) {
@@ -2129,13 +2289,42 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (claims == null) {
             claims = new String[0];
         }
+        Map<String, String> finalValues = new HashMap<>();
+        String[] allClaims = claims.clone();
 
-        Map<String, String> finalValues;
+        // #################### <PreListeners> ###################################################
+        try {
+            for (UserOperationEventListener listener : UMListenerServiceComponent.getUserOperationEventListeners()) {
+                if (listener instanceof AbstractUserOperationEventListener) {
+                    AbstractUserOperationEventListener newListener = (AbstractUserOperationEventListener) listener;
+                    if (!newListener
+                            .doPreGetUserClaimValues(userStore.getDomainFreeName(), claims, profileName, finalValues,
+                                    this)) {
+                        handleGetUserClaimValuesFailure(
+                                ErrorMessages.ERROR_CODE_ERROR_IN_PRE_GET_CLAIM_VALUES.getCode(),
+                                String.format(ErrorMessages.ERROR_CODE_ERROR_IN_PRE_GET_CLAIM_VALUES.getMessage(),
+                                        UserCoreErrorConstants.POST_LISTENER_TASKS_FAILED_MESSAGE), userName, claims,
+                                profileName);
+                        break;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleGetUserClaimValuesFailure(ErrorMessages.ERROR_CODE_ERROR_IN_PRE_GET_CLAIM_VALUES.getCode(),
+                    String.format(ErrorMessages.ERROR_CODE_ERROR_IN_PRE_GET_CLAIM_VALUES.getMessage(),
+                            ex.getMessage()), userName, claims, profileName);
+            throw ex;
+        }
+        // #################### </PreListeners> ###################################################
+
+        claims = removeNullElements(claims);
+
         try {
             if (isUniqueIdEnabled) {
                 finalValues = doGetUserClaimValuesWithID(userID, claims, userStore.getDomainName(), profileName);
             } else {
-                finalValues = doGetUserClaimValues(userStore.getDomainFreeName(), claims, userStore.getDomainName(), profileName);
+                finalValues = doGetUserClaimValues(userStore.getDomainFreeName(), claims, userStore.getDomainName(),
+                        profileName);
             }
         } catch (UserStoreException ex) {
             handleGetUserClaimValuesFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_CLAIM_VALUES.getCode(),
@@ -2144,14 +2333,14 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             throw ex;
         }
 
-        // #################### <Listeners> #####################################################
+        // #################### <PostListeners> #####################################################
         try {
             for (UserOperationEventListener listener : UMListenerServiceComponent.getUserOperationEventListeners()) {
                 if (listener instanceof AbstractUserOperationEventListener) {
                     AbstractUserOperationEventListener newListener = (AbstractUserOperationEventListener) listener;
                     if (!newListener
-                            .doPostGetUserClaimValues(userStore.getDomainFreeName(), claims, profileName, finalValues,
-                                    this)) {
+                            .doPostGetUserClaimValues(userStore.getDomainFreeName(), allClaims, profileName,
+                                    finalValues, this)) {
                         handleGetUserClaimValuesFailure(
                                 ErrorMessages.ERROR_CODE_ERROR_IN_POST_GET_CLAIM_VALUES.getCode(),
                                 String.format(ErrorMessages.ERROR_CODE_ERROR_IN_POST_GET_CLAIM_VALUES.getMessage(),
@@ -2167,9 +2356,20 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                             ex.getMessage()), userName, claims, profileName);
             throw ex;
         }
-        // #################### </Listeners> #####################################################
+        // #################### </PostListeners> #####################################################
 
         return finalValues;
+    }
+
+    /**
+     * Removes all null elements from the given String array.
+     *
+     * @param array Array The input String array.
+     * @return A new String array containing only non-null elements.
+     */
+    private static String[] removeNullElements(String[] array) {
+
+        return Arrays.stream(array).filter(Objects::nonNull).toArray(String[]::new);
     }
 
     /**
@@ -2939,10 +3139,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                                 ex.getMessage()), claim, claimValue, profileName);
                 throw ex;
             }
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("Pre listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            if (log.isDebugEnabled()) {
+                log.debug("Pre listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            }
         }
 
         // Iterate through user stores and check for users for this claim.
@@ -2954,18 +3153,21 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     .map(User::getDomainQualifiedUsername).collect(Collectors.toList());
         } else {
             userNamesFromUserStore = doGetUserList(claim, claimValue, profileName, extractedDomain, userManager);
-            if (log.isDebugEnabled()) {
+        }
+        if (log.isDebugEnabled()) {
+            if (StringUtils.isNotEmpty(extractedDomain)) {
                 log.debug("Users from user store: " + extractedDomain + " : " + userNamesFromUserStore);
+            } else {
+                log.debug("Users from all the user stores: " + userNamesFromUserStore);
             }
         }
         filteredUserList.addAll(userNamesFromUserStore);
 
         if (StringUtils.isNotEmpty(extractedDomain)) {
             handlePostGetUserList(claim, claimValue, filteredUserList, false);
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("Post listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            if (log.isDebugEnabled()) {
+                log.debug("Post listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            }
         }
 
         Collections.sort(filteredUserList);
@@ -2986,14 +3188,6 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     private boolean isUniqueGroupIdEnabled(UserStoreManager userManager) {
 
         if (!(userManager instanceof AbstractUserStoreManager)) {
-            return false;
-        }
-        // todo implement group uuid support for following UserStoreManagers.
-        //  https://github.com/wso2/product-is/issues/7914
-        if (userManager instanceof JDBCUserStoreManager) {
-            return false;
-        }
-        if (userManager instanceof ReadWriteLDAPUserStoreManager) {
             return false;
         }
         return ((AbstractUserStoreManager) userManager).isUniqueGroupIdEnabled();
@@ -3043,11 +3237,27 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 // Get the user list and return with domain appended.
                 try {
                     AbstractUserStoreManager userStoreManager = (AbstractUserStoreManager) userManager;
+
+                    // Validate whether circuit breaker is enabled and open.
+                    if (userStoreManager.isCircuitBreakerEnabledAndOpen()) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Circuit Breaker is in open state for:  " + extractedDomain);
+                        }
+                        return Collections.emptyList();
+                    }
                     String[] userArray = userStoreManager.getUserListFromProperties(property, claimValue, profileName);
                     if (log.isDebugEnabled()) {
                         log.debug("List of filtered users for: " + extractedDomain + " : " + Arrays.asList(userArray));
                     }
                     return Arrays.asList(UserCoreUtil.addDomainToNames(userArray, extractedDomain));
+                } catch (CircuitBreakerOpenException ex) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Circuit Breaker is in open state for " + extractedDomain
+                                + " domain. Hence ignore the userstore and proceed", ex);
+                    }
+                    log.error("Error occurred while obtaining user store connection.");
+                    return Collections.emptyList();
+
                 } catch (UserStoreException ex) {
                     handleGetUserListFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_USER_LIST.getCode(),
                             String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_USER_LIST.getMessage(),
@@ -3187,10 +3397,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                                 ex.getMessage()), claim, claimValue, profileName);
                 throw ex;
             }
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("Pre listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            if (log.isDebugEnabled()) {
+                log.debug("Pre listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            }
         }
 
         // Iterate through user stores and check for users for this claim.
@@ -3204,18 +3413,22 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     .listUsers(userNamesFromUserStore, (AbstractUserStoreManager) userManager);
         }
         if (log.isDebugEnabled()) {
-            log.debug("Users from user store: " + extractedDomain + " : " + usersFromUserStore.stream()
-                    .map(User::getUsername).collect(Collectors.toList()));
+            if (StringUtils.isNotEmpty(extractedDomain)) {
+                log.debug("Users from user store: " + extractedDomain + " : " + usersFromUserStore.stream()
+                        .map(User::getUsername).collect(Collectors.toList()));
+            } else {
+                log.debug("Users from all the user stores: " + usersFromUserStore.stream().map(User::getUsername)
+                        .collect(Collectors.toList()));
+            }
         }
         filteredUserList.addAll(usersFromUserStore);
 
         if (StringUtils.isNotEmpty(extractedDomain)) {
             handlePostGetUserListWithID(claim, claimValue, filteredUserList, false);
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("Post listener user list: " + filteredUserList.stream().map(User::getUsername)
-                    .collect(Collectors.toList()) + " for domain: " + extractedDomain);
+            if (log.isDebugEnabled()) {
+                log.debug("Post listener user list: " + filteredUserList.stream().map(User::getUsername)
+                        .collect(Collectors.toList()) + " for domain: " + extractedDomain);
+            }
         }
 
         for (org.wso2.carbon.user.core.common.User  user:filteredUserList) {
@@ -3267,6 +3480,16 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 // Get the user list and return with domain appended.
                 try {
                     AbstractUserStoreManager userStoreManager = (AbstractUserStoreManager) userManager;
+
+                    // Validate whether circuit breaker is enabled and open.
+                    if (userStoreManager.isCircuitBreakerEnabledAndOpen()) {
+                        if (log.isDebugEnabled()) {
+                            log.debug("Avoiding user listing as the Circuit Breaker is in open state for domain: "
+                                    + extractedDomain);
+                        }
+                        return Collections.emptyList();
+                    }
+
                     List<String> userIDs = userStoreManager
                             .doGetUserListFromPropertiesWithID(property, claimValue, profileName);
                     if (log.isDebugEnabled()) {
@@ -3274,6 +3497,13 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     }
                     return userStoreManager.getUsersFromIDs(userIDs, null, extractedDomain, profileName);
 
+                } catch (CircuitBreakerOpenException ex) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Circuit Breaker is in open state for " + extractedDomain
+                                + " domain. Hence ignore the userstore and proceed", ex);
+                    }
+                    log.error("Error occurred while obtaining user store connection.");
+                    return Collections.emptyList();
                 } catch (UserStoreException ex) {
                     handleGetUserListFailureWithID(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_USER_LIST.getCode(),
                             String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_USER_LIST.getMessage(),
@@ -3563,6 +3793,32 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
         // #################### <Listeners> #####################################################
         try {
+            // This user name here is domain-less.
+            // We directly authenticate user against the selected UserStoreManager.
+
+            // Property to check whether this user store supports new APIs with unique user id.
+            boolean isUniqueUserIdEnabled = isUniqueUserIdEnabledInUserStore(userStore);
+            String userID = null;
+            if (isUniqueUserIdEnabled) {
+                userID = getUserIDFromUserName(userName);
+            }
+
+            boolean isAuth;
+            if (isUniqueUserIdEnabled) {
+                String preferredUserNameProperty = getUsernameProperty();
+                isAuth = this.doAuthenticateWithID(preferredUserNameProperty, userName, oldCredentialObj, null)
+                        .getAuthenticationStatus() == AuthenticationResult.AuthenticationStatus.SUCCESS;
+            } else {
+                isAuth = this.doAuthenticate(userName, oldCredentialObj);
+            }
+
+            if (!isAuth) {
+                handleUpdateCredentialFailure(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getCode(),
+                        ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getMessage(), userName, newCredential,
+                        oldCredential);
+                throw new UserStoreException(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.toString());
+            }
+
             try {
                 for (UserStoreManagerListener listener : UMListenerServiceComponent.getUserStoreManagerListeners()) {
                     if (listener instanceof SecretHandleableListener) {
@@ -3621,96 +3877,70 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             }
             // #################### </Listeners> #####################################################
 
-            // This user name here is domain-less.
-            // We directly authenticate user against the selected UserStoreManager.
+            if (!checkUserPasswordValid(newCredential)) {
+                String errorMsg = realmConfig.getUserStoreProperty(PROPERTY_PASSWORD_ERROR_MSG);
 
-            // Property to check whether this user store supports new APIs with unique user id.
-            boolean isUniqueUserIdEnabled = isUniqueUserIdEnabledInUserStore(userStore);
-            String userID = null;
-            if (isUniqueUserIdEnabled) {
-                userID = getUserIDFromUserName(userName);
-            }
-
-            boolean isAuth;
-            if (isUniqueUserIdEnabled) {
-                String preferredUserNameProperty = getUsernameProperty();
-                isAuth = this.doAuthenticateWithID(preferredUserNameProperty, userName, oldCredentialObj, null)
-                        .getAuthenticationStatus() == AuthenticationResult.AuthenticationStatus.SUCCESS;
-            } else {
-                isAuth = this.doAuthenticate(userName, oldCredentialObj);
-            }
-
-            if (isAuth) {
-                if (!checkUserPasswordValid(newCredential)) {
-                    String errorMsg = realmConfig.getUserStoreProperty(PROPERTY_PASSWORD_ERROR_MSG);
-
-                    if (errorMsg != null) {
-                        String errorMessage = String
-                                .format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getMessage(),
-                                        errorMsg);
-                        String errorCode = ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getCode();
-                        handleUpdateCredentialFailure(errorCode, errorMessage, userName, newCredential, oldCredential);
-                        throw new UserStoreException(errorCode + " - " + errorMessage);
-                    }
-
-                    String errorMessage = String.format(ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getMessage(),
-                            realmConfig.getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_JAVA_REG_EX));
-                    String errorCode = ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getCode();
+                if (errorMsg != null) {
+                    String errorMessage = String
+                            .format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getMessage(),
+                                    errorMsg);
+                    String errorCode = ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getCode();
                     handleUpdateCredentialFailure(errorCode, errorMessage, userName, newCredential, oldCredential);
                     throw new UserStoreException(errorCode + " - " + errorMessage);
                 }
 
-                try {
-                    if (isUniqueUserIdEnabled) {
-                        this.doUpdateCredentialWithID(userID, newCredential, oldCredential);
-                    } else {
-                        this.doUpdateCredential(userName, newCredentialObj, oldCredentialObj);
-                    }
-                } catch (UserStoreException ex) {
-                    handleUpdateCredentialFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getCode(),
-                            String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getMessage(),
-                                    ex.getMessage()), userName, newCredential, oldCredential);
-                    throw ex;
-                }
+                String errorMessage = String.format(ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getMessage(),
+                        realmConfig.getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_JAVA_REG_EX));
+                String errorCode = ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getCode();
+                handleUpdateCredentialFailure(errorCode, errorMessage, userName, newCredential, oldCredential);
+                throw new UserStoreException(errorCode + " - " + errorMessage);
+            }
 
-                // #################### <Listeners> ##################################################
-                try {
-                    for (UserOperationEventListener listener : UMListenerServiceComponent
-                            .getUserOperationEventListeners()) {
-                        if (listener instanceof SecretHandleableListener) {
-                            if (!listener.doPostUpdateCredential(userName, newCredentialObj, this)) {
-                                handleUpdateCredentialFailure(
-                                        ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
-                                        String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL
-                                                .getMessage(), "Post update credential tasks failed"), userName,
-                                        newCredentialObj, oldCredentialObj);
-                                return;
-                            }
-                        } else {
-                            if (!listener.doPostUpdateCredential(userName, newCredential, this)) {
-                                handleUpdateCredentialFailure(
-                                        ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
-                                        String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL
-                                                .getMessage(), "Post update credential tasks failed"), userName,
-                                        newCredential, oldCredential);
-                                return;
-                            }
+            try {
+                if (isUniqueUserIdEnabled) {
+                    this.doUpdateCredentialWithID(userID, newCredential, oldCredential);
+                } else {
+                    this.doUpdateCredential(userName, newCredentialObj, oldCredentialObj);
+                }
+            } catch (UserStoreException ex) {
+                handleUpdateCredentialFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getCode(),
+                        String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getMessage(),
+                                ex.getMessage()), userName, newCredential, oldCredential);
+                throw ex;
+            }
+
+            // #################### <Listeners> ##################################################
+            try {
+                for (UserOperationEventListener listener : UMListenerServiceComponent
+                        .getUserOperationEventListeners()) {
+                    if (listener instanceof SecretHandleableListener) {
+                        if (!listener.doPostUpdateCredential(userName, newCredentialObj, this)) {
+                            handleUpdateCredentialFailure(
+                                    ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
+                                    String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL
+                                            .getMessage(), "Post update credential tasks failed"), userName,
+                                    newCredentialObj, oldCredentialObj);
+                            return;
+                        }
+                    } else {
+                        if (!listener.doPostUpdateCredential(userName, newCredential, this)) {
+                            handleUpdateCredentialFailure(
+                                    ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
+                                    String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL
+                                            .getMessage(), "Post update credential tasks failed"), userName,
+                                    newCredential, oldCredential);
+                            return;
                         }
                     }
-                } catch (UserStoreException ex) {
-                    handleUpdateCredentialFailure(
-                            ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
-                            String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getMessage(),
-                                    ex.getMessage()), userName, newCredential, oldCredential);
-                    throw ex;
                 }
-                // #################### </Listeners> ##################################################
-            } else {
-                handleUpdateCredentialFailure(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getCode(),
-                        ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getMessage(), userName, newCredential,
-                        oldCredential);
-                throw new UserStoreException(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.toString());
+            } catch (UserStoreException ex) {
+                handleUpdateCredentialFailure(
+                        ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
+                        String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getMessage(),
+                                ex.getMessage()), userName, newCredential, oldCredential);
+                throw ex;
             }
+            // #################### </Listeners> ##################################################
         } catch (org.wso2.carbon.user.api.UserStoreException e) {
             throw new UserStoreException(e.getMessage(), e);
         } finally {
@@ -3998,8 +4228,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             } else if (DISAPLAY_NAME_CLAIM.equals(claimURI)) {
                 attributeName = this.realmConfig.getUserStoreProperty(LDAPConstants.DISPLAY_NAME_ATTRIBUTE);
             } else {
-                throw new UserStoreException("Mapped attribute cannot be found for claim : " + claimURI + " in user " +
-                        "store : " + getMyDomainName());
+                throw new UserStoreClientException("Mapped attribute cannot be found for claim : " + claimURI +
+                        " in user store : " + getMyDomainName());
             }
         }
 
@@ -5359,6 +5589,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (deletedUsers.length > 0 || newUsers != null && newUsers.length > 0) {
             if (!isReadOnly() && writeGroupsEnabled) {
                 try {
+                    // No need to check for group uuid enabled since all userstores should support this. Retrieving
+                    // group id and moving in different direction is not efficient.
                     if (isUniqueUserIdEnabledInUserStore(userStore)) {
                         List<String> newUserIds = getUserIDsFromUserNames(Arrays.asList(newUsers));
                         List<String> deletedUserIds = getUserIDsFromUserNames(Arrays.asList(deletedUsers));
@@ -5942,10 +6174,16 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             return;
         }
         // #################### </Listeners> #####################################################
-
         if (!isReadOnly() && writeGroupsEnabled) {
             try {
-                doUpdateRoleName(userStore.getDomainFreeName(), userStoreNew.getDomainFreeName());
+                if (isUniqueGroupIdEnabled()) {
+                    String groupID = getGroupIdByGroupName(UserCoreUtil.removeDomainFromName(roleName));
+                    clearGroupIDResolverCache(groupID, tenantId);
+                    doUpdateGroupNameByGroupId(groupID, UserCoreUtil.removeDomainFromName(newRoleName));
+                    addGroupNameToGroupIdCache(groupID, newRoleName, getMyDomainName());
+                } else {
+                    doUpdateRoleName(userStore.getDomainFreeName(), userStoreNew.getDomainFreeName());
+                }
             } catch (UserStoreException ex) {
                 handleUpdateRoleNameFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_ROLE_NAME.getCode(),
                         String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_ROLE_NAME.getMessage(),
@@ -5967,7 +6205,6 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         // #################### <Listeners> #####################################################
         handlePostUpdateRoleName(roleName, newRoleName, false);
         // #################### </Listeners> #####################################################
-
     }
 
 
@@ -6319,9 +6556,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     return false;
                 }
             }
-        } else if (!userStore.getDomainName().equalsIgnoreCase(roleDomainName) && !(UserCoreConstants.INTERNAL_DOMAIN.
-                equalsIgnoreCase(roleDomainName) || APPLICATION_DOMAIN.equalsIgnoreCase(roleDomainName)
-                || WORKFLOW_DOMAIN.equalsIgnoreCase(roleDomainName))) {
+        } else if (!userStore.getDomainName().equalsIgnoreCase(roleDomainName) && !UserCoreConstants.INTERNAL_DOMAIN.
+                equalsIgnoreCase(roleDomainName)) {
             return false;
         }
 
@@ -6357,6 +6593,19 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             addToIsUserHasRole(modifiedUserName, roleName, roles);
         }
         return success;
+    }
+
+    /**
+     * Check whether the group name existing in the user store.
+     *
+     * @param groupName Group name.
+     * @return True if the group name exists.
+     * @throws UserStoreException If an error occurred.
+     */
+    protected boolean doCheckExistingGroupName(String groupName) throws UserStoreException {
+
+        // Default implementation to ensure backward compatibility.
+        return doCheckExistingRole(UserCoreUtil.removeDomainFromName(groupName));
     }
 
     /**
@@ -6424,15 +6673,24 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
         // #################### Domain Name Free Zone Starts Here ################################
 
-        if (userStore.isSystemStore()) {
-            return systemUserRoleManager.isExistingSystemUser(userStore.getDomainFreeName());
-        }
-
-        if (!isUniqueUserIdEnabledInUserStore(userStore)) {
-            return doCheckExistingUser(userStore.getDomainFreeName());
+        /* Validate whether circuit breaker is enabled and open for compatibility with old pre-listeners. */
+        if (((AbstractUserStoreManager) userStore.getUserStoreManager()).isCircuitBreakerEnabledAndOpen()) {
+            if (log.isDebugEnabled()) {
+                log.debug("Avoiding user listing as the Circuit Breaker is in open state for domain: "
+                        + userStore.getDomainName());
+            }
         } else {
-            return getUserIDFromUserName(userName) != null;
+            if (userStore.isSystemStore()) {
+                return systemUserRoleManager.isExistingSystemUser(userStore.getDomainFreeName());
+            }
+
+            if (!isUniqueUserIdEnabledInUserStore(userStore)) {
+                return doCheckExistingUser(userStore.getDomainFreeName());
+            } else {
+                return getUserIDFromUserName(userName) != null;
+            }
         }
+        return false;
     }
 
     /**
@@ -6450,46 +6708,59 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         index = filter.indexOf(CarbonConstants.DOMAIN_SEPARATOR);
         String[] userList;
 
-        // Check whether we have a secondary UserStoreManager setup.
-        if (index > 0) {
-            // Using the short-circuit. User name comes with the domain name.
-            String domain = filter.substring(0, index);
-
-            UserStoreManager secManager = getSecondaryUserStoreManager(domain);
-            if (secManager != null) {
-                // We have a secondary UserStoreManager registered for this domain.
-                filter = filter.substring(index + 1);
-                if (secManager instanceof AbstractUserStoreManager) {
-                    if (!((AbstractUserStoreManager) secManager).isUniqueUserIdEnabled()) {
-                        userList = ((AbstractUserStoreManager) secManager).doListUsers(filter, maxItemLimit);
-                    } else {
-                        userList = ((AbstractUserStoreManager) secManager).doListUsersWithID(filter, maxItemLimit)
-                                .stream()
-                                .map(User::getDomainQualifiedUsername)
-                                .toArray(String[]::new);
-                    }
-                    handlePostGetUserList(null, null, new ArrayList<>(Arrays.asList(userList)), true);
-                    return userList;
-                } else {
-                    userList = secManager.listUsers(filter, maxItemLimit);
-                    handlePostGetUserList(null, null, new ArrayList<>(Arrays.asList(userList)), true);
-                    return userList;
-                }
-            }
-        } else if (index == 0) {
-            if (!isUniqueUserIdEnabled()) {
-                userList = doListUsers(filter.substring(1), maxItemLimit);
-            } else {
-                userList = doListUsersWithID(filter.substring(1), maxItemLimit)
-                        .stream()
-                        .map(User::getDomainQualifiedUsername)
-                        .toArray(String[]::new);
-            }
-            handlePostGetUserList(null, null, new ArrayList<>(Arrays.asList(userList)), true);
-            return userList;
-        }
-
         try {
+            // Validate whether circuit breaker is enabled and open.
+            if (this.isCircuitBreakerEnabledAndOpen()) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Circuit Breaker is in open state for " + this.getMyDomainName()
+                            + " domain. Hence ignore the userstore and proceed");
+                }
+                return new String[0];
+            }
+            // Check whether we have a secondary UserStoreManager setup.
+            if (index > 0) {
+                // Using the short-circuit. User name comes with the domain name.
+                String domain = filter.substring(0, index);
+
+                UserStoreManager secManager = this;
+                if (!StringUtils.equalsIgnoreCase(getMyDomainName(), domain)) {
+                    secManager = getSecondaryUserStoreManager(domain);
+                }
+
+                if (secManager != null) {
+                    // We have a secondary UserStoreManager registered for this domain.
+                    filter = filter.substring(index + 1);
+                    if (secManager instanceof AbstractUserStoreManager) {
+
+                        if (!((AbstractUserStoreManager) secManager).isUniqueUserIdEnabled()) {
+                            userList = ((AbstractUserStoreManager) secManager).doListUsers(filter, maxItemLimit);
+                        } else {
+                            userList = ((AbstractUserStoreManager) secManager).doListUsersWithID(filter, maxItemLimit)
+                                    .stream()
+                                    .map(User::getDomainQualifiedUsername)
+                                    .toArray(String[]::new);
+                        }
+                        handlePostGetUserList(null, null, new ArrayList<>(Arrays.asList(userList)), true);
+                        return userList;
+                    } else {
+                        userList = secManager.listUsers(filter, maxItemLimit);
+                        handlePostGetUserList(null, null, new ArrayList<>(Arrays.asList(userList)), true);
+                        return userList;
+                    }
+                }
+            } else if (index == 0) {
+                if (!isUniqueUserIdEnabled()) {
+                    userList = doListUsers(filter.substring(1), maxItemLimit);
+                } else {
+                    userList = doListUsersWithID(filter.substring(1), maxItemLimit)
+                            .stream()
+                            .map(User::getDomainQualifiedUsername)
+                            .toArray(String[]::new);
+                }
+                handlePostGetUserList(null, null, new ArrayList<>(Arrays.asList(userList)), true);
+                return userList;
+            }
+
             if (!isUniqueUserIdEnabled()) {
                 userList = doListUsers(filter, maxItemLimit);
             } else {
@@ -6498,6 +6769,13 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                         .map(User::getUsername)
                         .toArray(String[]::new);
             }
+        } catch (CircuitBreakerOpenException ex) {
+            if (log.isDebugEnabled()) {
+                log.debug("Circuit Breaker is in open state for " + this.getMyDomainName()
+                        + " domain. Hence ignore " + "the userstore and proceed", ex);
+            }
+            log.error("Error occurred while obtaining user store connection.");
+            return new String[0];
         } catch (UserStoreException ex) {
             handleGetUserListFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_USER_LIST.getCode(),
                     String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_GETTING_USER_LIST.getMessage(), ex.getMessage()),
@@ -6883,6 +7161,508 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     }
 
     /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to add a
+     * group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupName    Name of the group.
+     * @param groupId      ID of the group.
+     * @param usersIDs     List of users to be assigned to the group.
+     * @param claims       Claims of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handleAddGroupFailure(String errorCode, String errorMessage, String groupName, String groupId,
+                                       List<String> usersIDs, List<org.wso2.carbon.user.core.common.Claim> claims)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onAddGroupFailure(errorCode, errorMessage, groupName, usersIDs, claims,
+                    this)) {
+                log.error("'onAddGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * pre add a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupName    Name of the group.
+     * @param usersIDs     List of users to be assigned to the group.
+     * @param claims       Claims of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePreAddGroupFailure(String errorCode, String errorMessage, String groupName,
+                                          List<String> usersIDs, List<org.wso2.carbon.user.core.common.Claim> claims)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onPreAddGroupFailure(errorCode, errorMessage, groupName, usersIDs, claims,
+                    this)) {
+                log.error("'onPreAddGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to post
+     * delete a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupName    Name of the group.
+     * @param groupID      ID of the group.
+     * @param usersIDs     List of users to be assigned to the group.
+     * @param claims       Claims of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostAddGroupFailure(String errorCode, String errorMessage, String groupName, String groupID,
+                                           List<String> usersIDs, List<org.wso2.carbon.user.core.common.Claim> claims)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener &&
+                    !listener.onPostAddGroupFailure(errorCode, errorMessage, groupName, groupID, usersIDs, claims,
+                    this)) {
+                log.error("'onPostAddGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods deleting a group.
+     *
+     * @param groupId ID of the group.
+     * @return True if the group is operation is successful.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private boolean handlePreDeleteGroup(String groupId) throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent
+                    .getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.preDeleteGroup(groupId, this)) {
+                        handlePreDeleteGroupFailure(ErrorMessages.ERROR_DURING_PRE_DELETE_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_PRE_DELETE_GROUP.getMessage(),
+                                        UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), groupId);
+                        return false;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleDeleteGroupFailure(ErrorMessages.ERROR_DURING_PRE_DELETE_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_PRE_DELETE_GROUP.getMessage(), ex.getMessage()), groupId);
+            throw ex;
+        }
+        return true;
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods after deleting a group.
+     *
+     * @param groupId ID of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostDeleteGroup(String groupId, String groupName) throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent
+                    .getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.postDeleteGroup(groupId, groupName, this)) {
+                        handlePostDeleteGroupFailure(ErrorMessages.ERROR_DURING_POST_DELETE_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_POST_DELETE_GROUP.getMessage(),
+                                        UserCoreErrorConstants.POST_LISTENER_TASKS_FAILED_MESSAGE), groupId, groupName);
+                        return;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleDeleteGroupFailure(ErrorMessages.ERROR_DURING_POST_DELETE_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_POST_DELETE_GROUP.getMessage(), ex.getMessage()),
+                    groupName);
+            throw ex;
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * pre delete a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupId      ID of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePreDeleteGroupFailure(String errorCode, String errorMessage, String groupId)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onPreDeleteGroupFailure(errorCode, errorMessage, groupId, this)) {
+                log.error("'onPreDeleteGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * post delete a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupId      ID of the group.
+     * @param groupName    Name of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostDeleteGroupFailure(String errorCode, String errorMessage, String groupId, String groupName)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onPostDeleteGroupFailure(errorCode, errorMessage, groupId, groupName, this)) {
+                log.error("'onPostDeleteGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * delete a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupId      ID of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handleDeleteGroupFailure(String errorCode, String errorMessage, String groupId)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onDeleteGroupFailure(errorCode, errorMessage, groupId, this)) {
+                log.error("'onDeleteGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods deleting a group.
+     *
+     * @param groupId      ID of the group.
+     * @param newGroupName Name of the group.
+     * @return True if the group is operation is successful.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private boolean handlePreRenameGroup(String groupId, String newGroupName) throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent
+                    .getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.preRenameGroup(groupId, newGroupName, this)) {
+                        handlePreRenameGroupFailure(ErrorMessages.ERROR_DURING_PRE_RENAME_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_PRE_RENAME_GROUP.getMessage(),
+                                        UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE),
+                                groupId, newGroupName);
+                        return false;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleRenameGroupFailure(ErrorMessages.ERROR_DURING_PRE_RENAME_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_PRE_RENAME_GROUP.getMessage(), ex.getMessage()),
+                    groupId, newGroupName);
+            throw ex;
+        }
+        return true;
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods after deleting a group.
+     *
+     * @param groupId      ID of the group.
+     * @param newGroupName New name of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostRenameGroup(String groupId, String newGroupName) throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent
+                    .getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.postRenameGroup(groupId, newGroupName, this)) {
+                        handlePostRenameGroupFailure(ErrorMessages.ERROR_DURING_POST_RENAME_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_POST_RENAME_GROUP.getMessage(),
+                                        UserCoreErrorConstants.POST_LISTENER_TASKS_FAILED_MESSAGE),
+                                groupId, newGroupName);
+                        return;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleRenameGroupFailure(ErrorMessages.ERROR_DURING_POST_RENAME_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_POST_RENAME_GROUP.getMessage(), ex.getMessage()), groupId,
+                    newGroupName);
+            throw ex;
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * pre rename a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupId      ID of the group.
+     * @param newGroupName Name of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePreRenameGroupFailure(String errorCode, String errorMessage, String groupId, String newGroupName)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onPreRenameGroupFailure(errorCode, errorMessage, groupId, newGroupName,
+                    this)) {
+                log.error("'onPreRenameGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * post rename a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupId      ID of the group.
+     * @param newGroupName Name of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostRenameGroupFailure(String errorCode, String errorMessage, String groupId,
+                                              String newGroupName)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onPostRenameGroupFailure(errorCode, errorMessage, groupId, newGroupName,
+                    this)) {
+                log.error("'handlePostRenameGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * rename a group.
+     *
+     * @param errorCode    Error code.
+     * @param errorMessage Error message.
+     * @param groupId      ID of the group.
+     * @param newGroupName New name of the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handleRenameGroupFailure(String errorCode, String errorMessage, String groupId, String newGroupName)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onRenameGroupFailure(errorCode, errorMessage, groupId, newGroupName,
+                    this)) {
+                log.error("'onRenameGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods before updating user list of a group.
+     *
+     * @param groupId        ID of the group.
+     * @param deletedUserIds List of users to be removed from the group.
+     * @param newUserIds     List of users to be added to the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private boolean handlePreUpdateUserListOfGroup(String groupId, List<String> deletedUserIds,
+                                                   List<String> newUserIds) throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent.getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.preUpdateUserListOfGroup(groupId, deletedUserIds, newUserIds,
+                            this)) {
+                        handlePreUpdateUserListOfGroupFailure(
+                                ErrorMessages.ERROR_DURING_PRE_UPDATE_USER_LIST_OF_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_PRE_UPDATE_USER_LIST_OF_GROUP.getMessage(),
+                                        UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE),
+                                groupId, deletedUserIds, newUserIds);
+                        return false;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleUpdateUserListOfGroupFailure(ErrorMessages.ERROR_DURING_PRE_UPDATE_USER_LIST_OF_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_PRE_UPDATE_USER_LIST_OF_GROUP.getMessage(),
+                            ex.getMessage()), groupId, deletedUserIds, newUserIds);
+            throw ex;
+        }
+        return true;
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods after updating user list of a group.
+     *
+     * @param groupId        ID of the group.
+     * @param deletedUserIds List of users to be removed from the group.
+     * @param newUserIds     List of users to be added to the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostUpdateUserListOfGroup(String groupId, List<String> deletedUserIds, List<String> newUserIds)
+            throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent.getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.postUpdateUserListOfGroup(groupId, deletedUserIds, newUserIds,
+                            this)) {
+                        handlePostUpdateUserListOfGroupFailure(
+                                ErrorMessages.ERROR_DURING_POST_UPDATE_USER_LIST_OF_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_POST_UPDATE_USER_LIST_OF_GROUP.getMessage(),
+                                        UserCoreErrorConstants.POST_LISTENER_TASKS_FAILED_MESSAGE),
+                                groupId, deletedUserIds, newUserIds);
+                        return;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleUpdateUserListOfGroupFailure(ErrorMessages.ERROR_DURING_POST_UPDATE_USER_LIST_OF_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_POST_UPDATE_USER_LIST_OF_GROUP.getMessage(),
+                            ex.getMessage()), groupId, deletedUserIds, newUserIds);
+            throw ex;
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * pre rename a group.
+     *
+     * @param errorCode      Error code.
+     * @param errorMessage   Error message.
+     * @param groupId        ID of the group.
+     * @param deletedUserIds List of users to be removed from the group.
+     * @param newUserIds     List of users to be added to the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePreUpdateUserListOfGroupFailure(String errorCode, String errorMessage, String groupId,
+                                                       List<String> deletedUserIds, List<String> newUserIds)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onPreUpdateUserListOfGroupFailure(errorCode, errorMessage, groupId, deletedUserIds,
+                    newUserIds, this)) {
+                log.error("'onPreUpdateUserListOfGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * post rename a group.
+     *
+     * @param errorCode      Error code.
+     * @param errorMessage   Error message.
+     * @param groupId        ID of the group.
+     * @param deletedUserIds List of users to be removed from the group.
+     * @param newUserIds     List of users to be added to the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostUpdateUserListOfGroupFailure(String errorCode, String errorMessage, String groupId,
+                                                        List<String> deletedUserIds, List<String> newUserIds)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener :
+                UMListenerServiceComponent.getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener &&
+                    !listener.onPostUpdateUserListOfGroupFailure(errorCode, errorMessage, groupId, deletedUserIds,
+                            newUserIds, this)) {
+                log.error("'onPostUpdateUserListOfGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
+     * This method is responsible for calling relevant listener methods when there is a failure while trying to
+     * rename a group.
+     *
+     * @param errorCode      Error code.
+     * @param errorMessage   Error message.
+     * @param groupId        ID of the group.
+     * @param deletedUserIds List of users to be removed from the group.
+     * @param newUserIds     List of users to be added to the group.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handleUpdateUserListOfGroupFailure(String errorCode, String errorMessage, String groupId,
+                                                    List<String> deletedUserIds, List<String> newUserIds)
+            throws UserStoreException {
+
+        for (GroupManagementErrorEventListener listener : UMListenerServiceComponent
+                .getGroupManagementErrorEventListeners()) {
+            if (listener.isEnable() && listener instanceof AbstractGroupManagementErrorEventListener
+                    && !listener.onUpdateUserListOfGroupFailure(errorCode, errorMessage, groupId, deletedUserIds,
+                    newUserIds, this)) {
+                log.error("'onUpdateUserListOfGroupFailure' event invocation failed for listener: " +
+                        listener.getClass().getName());
+                return;
+            }
+        }
+    }
+
+    /**
      * This method is responsible for calling relevant postAddRole listener methods after successfully adding role.
      *
      * @param roleName       Name of the role.
@@ -7056,7 +7836,13 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     doAddRole(roleName, userList, isSharedRole);
                 } else {
                     List<String> userIDs = getUserIDsFromUserNames(Arrays.asList(userList));
-                    doAddRoleWithID(roleName, userIDs.toArray(new String[0]), isSharedRole);
+                    if (isUniqueGroupIdEnabled()) {
+                        Group group = doAddGroup(roleName, generateGroupUUID(), userIDs, null);
+                        groupUniqueIDDomainResolver.setDomainForGroupId(group.getGroupID(), getMyDomainName(), tenantId,
+                                false);
+                    } else {
+                        doAddRoleWithID(roleName, userIDs.toArray(new String[0]), isSharedRole);
+                    }
                 }
                 roleWithDomain = UserCoreUtil.addDomainToName(roleName, getMyDomainName());
             } catch (UserStoreException ex) {
@@ -7247,8 +8033,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             callSecure("deleteRole", new Object[]{roleName}, argTypes);
             return;
         }
-
-        if (UserCoreUtil.isPrimaryAdminRole(roleName, realmConfig)) {
+        if (UserCoreUtil.isPrimaryAdminRole(roleName, realmConfig)
+                && !StringUtils.equals(getTenantDomain(tenantId), realmConfig.getAssociatedOrganizationUUID())) {
             handleDeleteRoleFailure(ErrorMessages.ERROR_CODE_CANNOT_DELETE_ADMIN_ROLE.getCode(),
                     ErrorMessages.ERROR_CODE_CANNOT_DELETE_ADMIN_ROLE.getMessage(), roleName);
             throw new UserStoreException(ErrorMessages.ERROR_CODE_CANNOT_DELETE_ADMIN_ROLE.toString());
@@ -7264,10 +8050,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             userStore.getUserStoreManager().deleteRole(userStore.getDomainFreeName());
             return;
         }
-
         String roleWithDomain = UserCoreUtil.addDomainToName(roleName, getMyDomainName());
         // #################### Domain Name Free Zone Starts Here ################################
-
         if (userStore.isHybridRole()) {
             // Invoke pre listeners.
             if (!handleDoPreDeleteRole(roleName, false)) {
@@ -7290,7 +8074,6 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             clearUserRolesCacheByTenant(tenantId);
             return;
         }
-
         if (!doCheckExistingRole(roleName)) {
             handleDeleteRoleFailure(ErrorMessages.ERROR_CODE_CANNOT_DELETE_NON_EXISTING_ROLE.getCode(),
                     ErrorMessages.ERROR_CODE_CANNOT_DELETE_NON_EXISTING_ROLE.getMessage(), roleName);
@@ -7307,30 +8090,31 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getMessage(), roleName);
             throw new UserStoreException(ErrorMessages.ERROR_CODE_READONLY_USER_STORE.toString());
         }
-
         if (!writeGroupsEnabled) {
             handleDeleteRoleFailure(ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getCode(),
                     ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getMessage(), roleName);
             throw new UserStoreException(ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.toString());
         }
         try {
-            doDeleteRole(roleName);
+            if (isUniqueGroupIdEnabled()) {
+                String groupID = doGetGroupIdFromGroupName(UserCoreUtil.removeDomainFromName(roleName));
+                groupUniqueIDDomainResolver.removeDomainForGroupId(groupID, getMyDomainName(), tenantId, false);
+                doDeleteGroupByGroupId(groupID);
+            } else {
+                doDeleteRole(roleName);
+            }
         } catch (UserStoreException ex) {
             handleDeleteRoleFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_DELETE_ROLE.getCode(),
                     String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_DELETE_ROLE.getMessage(), ex.getMessage()),
                     roleName);
             throw ex;
         }
-
         // clear role authorization
         userRealm.getAuthorizationManager().clearRoleAuthorization(roleWithDomain);
-
         // clear cache
         clearUserRolesCacheByTenant(tenantId);
-
         // Call relevant listeners after deleting the role.
         handleDoPostDeleteRole(roleName, false);
-
     }
 
     /**
@@ -7399,7 +8183,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     protected UserStore getUserStoreWithGroupId(final String groupId) throws UserStoreException {
 
         try {
-            return AccessController.doPrivileged((PrivilegedExceptionAction<UserStore>) 
+            return AccessController.doPrivileged((PrivilegedExceptionAction<UserStore>)
                     () -> getUserStoreInternalWithGroupId(groupId));
         } catch (PrivilegedActionException e) {
             throw (UserStoreException) e.getException();
@@ -7670,7 +8454,10 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
         // First we have to check whether this user store is already resolved and we have it either in the cache or
         // in our local database. If so we can use that.
-        String domainName = userUniqueIDDomainResolver.getDomainForUserId(userId, tenantId);
+        String domainName = null;
+        if (userUniqueIDDomainResolver != null) {
+            domainName = userUniqueIDDomainResolver.getDomainForUserId(userId, tenantId);
+        }
 
         // If we don't have the domain name in our side, then we have to iterate through each user store and find
         // where is this user id from and mark it as the user store domain.
@@ -7686,7 +8473,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                                 // If we found a domain name for the give user id, update the domain resolver with
                                 // the name.
                                 domainName = entry.getKey();
-                                userUniqueIDDomainResolver.setDomainForUserId(userId, domainName, tenantId);
+                                userUniqueIDDomainResolver.setDomainForUserIdIfNotExists(userId, domainName, tenantId);
                                 break;
                             }
                         } catch (UserStoreException e) {
@@ -7701,9 +8488,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                         // This is happening when the user store is not supporting uniqueID.
                         try {
                             if (abstractUserStoreManager.getUserListFromProperties(claimManager.getAttributeName(entry
-                                    .getKey(), UserCoreClaimConstants.USER_ID_CLAIM_URI), userId, null).length > 0) {
+                                    .getKey(), USER_ID_CLAIM_URI), userId, null).length > 0) {
                                 domainName = entry.getKey();
-                                userUniqueIDDomainResolver.setDomainForUserId(userId, domainName, tenantId);
+                                userUniqueIDDomainResolver.setDomainForUserIdIfNotExists(userId, domainName, tenantId);
                                 break;
                             }
                         } catch (org.wso2.carbon.user.api.UserStoreException e) {
@@ -8480,14 +9267,17 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             return false;
         }
 
-        Secret credentialObj;
+        Secret credentialObj = null;
         try {
             credentialObj = Secret.getSecret(credential);
+            return credentialObj.getChars().length >= 1;
         } catch (UnsupportedSecretTypeException e) {
             throw new UserStoreException("Unsupported credential type", e);
+        } finally {
+            if (credentialObj != null) {
+                credentialObj.clear();
+            }
         }
-
-        return credentialObj.getChars().length >= 1;
     }
 
     /**
@@ -8497,6 +9287,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
      */
     protected boolean checkUserNameValid(String userName) throws UserStoreException {
 
+        if (UserCoreUtil.getSkipUsernamePatternValidationThreadLocal()) {
+            return true;
+        }
         if (isValidUserName(userName)) {
             String regularExpression = realmConfig
                     .getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_USER_NAME_JAVA_REG_EX);
@@ -8601,6 +9394,25 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
 
         return true;
+    }
+
+    /**
+     * Check whether the given group name is valid.
+     *
+     * @param groupName Name of the group.
+     * @return True if the group name is valid.
+     */
+    protected boolean isGroupNameValid(String groupName) {
+
+        if (StringUtils.isBlank(groupName)) {
+            return false;
+        }
+        String regularExpression = realmConfig
+                .getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_ROLE_NAME_JAVA_REG_EX);
+        if (StringUtils.isBlank(regularExpression)) {
+            return true;
+        }
+        return isFormatCorrect(regularExpression, groupName);
     }
 
     protected String[] getRoleListOfUserFromCache(int tenantID, String userName) {
@@ -8841,6 +9653,37 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
         throw new NotImplementedException(
                 "doGetUserListOfRoleWithID operation is not implemented in: " + this.getClass());
+    }
+
+    /**
+     * Return the count of users belong to the given role for the given filter when unique id feature is not enabled.
+     *
+     * @param roleName role name.
+     * @return user count for the given role.
+     * @throws UserStoreException Thrown by the underlying UserStoreManager.
+     */
+    protected int doGetUserCountOfRole(String roleName) throws UserStoreException {
+
+        if (log.isDebugEnabled()) {
+            log.debug("doGetUserCountOfRole operation is not implemented in: " + this.getClass());
+        }
+        throw new NotImplementedException("doGetUserCountOfRole operation is not implemented in: " + this.getClass());
+    }
+
+    /**
+     * Return the count of users belong to the given role.
+     *
+     * @param roleName Name of the role.
+     * @return User count for the given role.
+     * @throws UserStoreException Thrown by the underlying UserStoreManager.
+     */
+    protected int doGetUserCountOfRoleWithID(String roleName) throws UserStoreException {
+
+        if (log.isDebugEnabled()) {
+            log.debug("doGetUserCountOfRoleWithID operation is not implemented in: " + this.getClass());
+        }
+        throw new NotImplementedException(
+                "doGetUserCountOfRoleWithID operation is not implemented in: " + this.getClass());
     }
 
     /**
@@ -9157,6 +10000,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
         String adminUserName = UserCoreUtil.removeDomainFromName(realmConfig.getAdminUserName());
         String adminRoleName = UserCoreUtil.removeDomainFromName(realmConfig.getAdminRoleName());
+        boolean isReadGroupsEnabled = Boolean.parseBoolean(this.getRealmConfiguration()
+                .getUserStoreProperty(UserCoreConstants.RealmConfig.READ_GROUPS_ENABLED));
         boolean userExist = false;
         boolean roleExist = false;
         boolean isInternalRole = false;
@@ -9164,8 +10009,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         User user = null;
 
         try {
-            if (!isRoleAndGroupSeparationEnabled() && Boolean.parseBoolean(this.getRealmConfiguration()
-                    .getUserStoreProperty(UserCoreConstants.RealmConfig.READ_GROUPS_ENABLED))) {
+            if (!isRoleAndGroupSeparationEnabled() && isReadGroupsEnabled) {
                 roleExist = doCheckExistingRole(adminRoleName);
             }
         } catch (Exception e) {
@@ -9206,11 +10050,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 String message = "Admin user can not be created in primary user store. " +
                         "User store is read only. " +
                         "Please pick a user name which is exist in the primary user store as Admin user";
-                if (initialSetup) {
-                    throw new UserStoreException(message);
-                } else if (log.isDebugEnabled()) {
-                    log.error(message);
-                }
+                handleInitialSetup(initialSetup, message);
             } else if (addAdmin) {
                 try {
                     if (isUniqueUserIdEnabled()) {
@@ -9219,34 +10059,23 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     } else {
                         // Call the old API since this user store does not support the unique user id related APIs.
                         Map<String, String> claims = new HashMap<>();
-                        claims.put(UserCoreClaimConstants.USER_ID_CLAIM_URI, getUniqueUserID());
+                        claims.put(USER_ID_CLAIM_URI, getUniqueUserID());
                         this.doAddUser(adminUserName, realmConfig.getAdminPassword(), null, claims, null, false);
                     }
                 } catch (Exception e) {
                     String message = "Admin user has not been created. " +
                             "Error occurs while creating Admin user in primary user store.";
-                    if (initialSetup) {
-                        if (e instanceof UserStoreException && ERROR_CODE_DUPLICATE_WHILE_ADDING_A_USER.getCode
-                                ().equals(((UserStoreException) e).getErrorCode())) {
-                            log.warn(String.format("Admin User :%s is already added. Hence, continue without adding" +
-                                    " the user.", adminUserName));
-                        } else {
-                            throw new UserStoreException(message, e);
-                        }
-                    } else if (log.isDebugEnabled()) {
-                        log.error(message, e);
-                    }
+                    String warnMessage = String.format("Admin User :%s is already added. Hence, continue without" +
+                            " adding the user.", adminUserName);
+                    handleInitialSetupException(initialSetup, e,
+                            ERROR_CODE_DUPLICATE_WHILE_ADDING_A_USER.getCode(), message, warnMessage);
                 }
             } else {
                 if (initialSetup) {
                     String message = "Admin user can not be created in primary user store. " +
                             "Add-Admin has been set to false. " +
                             "Please pick a User name which is exist in the primary user store as Admin user";
-                    if (initialSetup) {
-                        throw new UserStoreException(message);
-                    } else if (log.isDebugEnabled()) {
-                        log.error(message);
-                    }
+                    handleInitialSetup(initialSetup, message);
                 }
             }
         }
@@ -9271,38 +10100,32 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     } catch (org.wso2.carbon.user.api.UserStoreException e) {
                         String message = "Admin role has not been created. " +
                                 "Error occurs while creating Admin role in primary user store.";
-                        if (initialSetup) {
-                            if (ERROR_CODE_DUPLICATE_WHILE_ADDING_ROLE.getCode().equals(((UserStoreException) e)
-                                    .getErrorCode())) {
-                                log.warn(String.format("Admin Role :%s is already added. Hence, continue without " +
-                                        "adding the role.", adminRoleName));
-                            } else {
-                                throw new UserStoreException(message, e);
-                            }
-                        } else if (log.isDebugEnabled()) {
-                            log.error(message, e);
-                        }
+                        String warnMessage = String.format("Admin Role :%s is already added. Hence, continue without"
+                                + " adding the role.", adminRoleName);
+                        handleInitialSetupException(initialSetup, e,
+                                ERROR_CODE_DUPLICATE_WHILE_ADDING_ROLE.getCode(), message, warnMessage);
                     }
                 } else {
                     // Creates internal role.
                     try {
-                        if (isUniqueUserIdEnabled()) {
-                            hybridRoleManager.addHybridRole(adminRoleName, new String[] { adminUserName });
-                        } else {
-                            hybridRoleManager.addHybridRole(adminRoleName, new String[] { adminUserName });
-                        }
+                        hybridRoleManager.addHybridRole(adminRoleName, new String[] { adminUserName });
                         isInternalRole = true;
 
                         if (isRoleAndGroupSeparationEnabled()) {
                             // Create a new admin group with the same role name if not exist.
                             boolean groupExist = false;
-                            if (Boolean.parseBoolean(this.getRealmConfiguration()
-                                    .getUserStoreProperty(UserCoreConstants.RealmConfig.READ_GROUPS_ENABLED))) {
+                            if (isReadGroupsEnabled) {
                                 groupExist = doCheckExistingRole(adminRoleName);
                             }
                             if (!groupExist && !isReadOnly() && writeGroupsEnabled) {
                                 if (isUniqueUserIdEnabled()) {
-                                    this.doAddRoleWithID(adminRoleName, new String[] { adminUserID }, false);
+                                    if (isUniqueGroupIdEnabled()) {
+                                        List<String> members = new ArrayList<>();
+                                        members.add(adminUserID);
+                                        this.doAddGroup(adminRoleName, generateGroupUUID(), members, null);
+                                    } else {
+                                        this.doAddRoleWithID(adminRoleName, new String[]{adminUserID}, false);
+                                    }
                                 } else {
                                     this.doAddRole(adminRoleName, new String[] { adminUserName }, false);
                                 }
@@ -9316,38 +10139,30 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     } catch (Exception e) {
                         String message = "Admin role has not been created. " +
                                 "Error occurs while creating Admin role in primary user store.";
-                        if (initialSetup) {
-                            if (ERROR_CODE_DUPLICATE_WHILE_ADDING_A_HYBRID_ROLE.getCode().equals(((UserStoreException) e)
-                                    .getErrorCode())) {
-                                log.warn(String.format("Hybrid Admin Role :%s is already added. Hence, continue " +
-                                        "without adding the hybrid role.", adminRoleName));
-                            } else {
-                                throw new UserStoreException(message, e);
-                            }
-                        } else if (log.isDebugEnabled()) {
-                            log.error(message, e);
-                        }
+                        String warnMessage = String.format("Hybrid Admin Role :%s is already added. Hence, continue"
+                                + " without adding the hybrid role.", adminRoleName);
+                        handleInitialSetupException(initialSetup, e,
+                                ERROR_CODE_DUPLICATE_WHILE_ADDING_A_HYBRID_ROLE.getCode(), message, warnMessage);
                     }
+                }
+            } else if (isRoleAndGroupSeparationEnabled()) {
+                // The adminRoleName variable refers to the group here, not the role.
+                // This variable was named as such prior to the group-role separation.
+                boolean groupExist = doesGroupExist(isReadGroupsEnabled, adminRoleName);
+                if (createAdminRole(initialSetup, groupExist, adminRoleName, adminUserName)) {
+                    isInternalRole = Boolean.TRUE;
                 }
             } else {
                 String message = "Admin role can not be created in primary user store. " +
                         "Add-Admin has been set to false. " +
                         "Please pick a Role name which is exist in the primary user store as Admin Role";
-                if (initialSetup) {
-                    throw new UserStoreException(message);
-                } else if (log.isDebugEnabled()) {
-                    log.error(message);
-                }
+                handleInitialSetup(initialSetup, message);
             }
         }
 
         if (isInternalRole) {
 
-            if (isUniqueUserIdEnabled()) {
-                updateHybridRoleListOfUserInternal(initialSetup, adminRoleName, adminUserName);
-            } else {
-                updateHybridRoleListOfUserInternal(initialSetup, adminRoleName, adminUserName);
-            }
+            updateHybridRoleListOfUserInternal(initialSetup, adminRoleName, adminUserName);
             realmConfig.setAdminRoleName(UserCoreUtil.addInternalDomainName(adminRoleName));
         } else if (!isReadOnly() && writeGroupsEnabled) {
 
@@ -9368,25 +10183,128 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     } catch (Exception e) {
                         String message = "Admin user has not been assigned to Admin role. " +
                                 "Error while assignment is done";
-                        if (initialSetup) {
-                            throw new UserStoreException(message, e);
-                        } else if (log.isDebugEnabled()) {
-                            log.error(message, e);
-                        }
+                        handleInitialSetup(initialSetup, message);
                     }
                 } else {
                     String message = "Admin user can not be assigned to Admin role " +
                             "Add-Admin has been set to false. Please do the assign it in user store level";
-                    if (initialSetup) {
-                        throw new UserStoreException(message);
-                    } else if (log.isDebugEnabled()) {
-                        log.error(message);
-                    }
+                    handleInitialSetup(initialSetup, message);
                 }
             }
         }
 
         doInitialUserAdding();
+    }
+
+    /**
+     * Creates the admin role when the create_admin_account configuration is set to false
+     * in the deployment.toml when group-role separation is enabled (admin account creation
+     * when the config is set to true is handled separately).
+     *
+     * When group-role separation is enabled, it is expected that the admin role is created in
+     * the system and that the necessary user associations are established, regardless of whether
+     * create_admin_account is enabled, because roles are managed separately in the system
+     * database after the group-role separation.
+     *
+     * @param initialSetup         A flag to indicate whether this is the initial set up of the server.
+     * @param groupExist           A flag to indicate whether the group exists.
+     * @param adminRoleName        The name of the admin role being created exists.
+     * @param adminUserName        The name of the admin user.
+     * @throws UserStoreException  when an error occurs during the initial set up.
+     */
+    private boolean createAdminRole(boolean initialSetup, boolean groupExist,
+                                    String adminRoleName, String adminUserName)
+            throws UserStoreException {
+
+        boolean created = Boolean.FALSE;
+        if (groupExist) {
+            // Create admin role since roles are maintained separately in the
+            // database after the separation of groups and roles.
+            try {
+                hybridRoleManager.addHybridRole(adminRoleName, new String[]{adminUserName});
+                created = Boolean.TRUE;
+                // Assign the admin group to the admin role.
+                this.updateGroupListOfHybridRole(adminRoleName, null, new String[]{adminRoleName});
+            } catch (Exception e) {
+                String message = "Admin role has not been created. " +
+                        "Error occurs while creating Admin role in primary user store.";
+                String warnMessage = String.format("Hybrid Admin Role :%s is already added. Hence, continue " +
+                        "without adding the hybrid role.", adminRoleName);
+                handleInitialSetupException(initialSetup, e,
+                        ERROR_CODE_DUPLICATE_WHILE_ADDING_A_HYBRID_ROLE.getCode(), message, warnMessage);
+            }
+        } else {
+            String message = "Admin group can not be created in primary user store. " +
+                    "Add-Admin has been set to false. " +
+                    "Please pick a Group name which is exist in the primary user store as Admin group";
+            handleInitialSetup(initialSetup, message);
+        }
+        return created;
+    }
+
+    /**
+     * Handles error scenarios in the initial set up when admin accounts are created.
+     *
+     * @param initialSetup         A flag to indicate whether this is the initial set up of the server.
+     * @param message              The error message to be used in the exception or error log.
+     * @throws UserStoreException  If this method is called during the initial set up.
+     */
+    private void handleInitialSetup(boolean initialSetup, String message)
+            throws UserStoreException {
+
+        if (initialSetup) {
+            throw new UserStoreException(message);
+        } else {
+            log.error(message);
+        }
+    }
+
+    /**
+     * Handles caught exception scenarios in the initial set up when admin accounts are created.
+     *
+     * @param initialSetup         A flag to indicate whether this is the initial set up of the server.
+     * @param e                    The exception being handled.
+     * @param errorCode            The error code to be checked for in the exception being handled.
+     * @param message              The message to be printed with the exception or error log.
+     * @param warnMessage          The warn message to be printed if the error code of the exception.
+     *                             matches the error code being checked for.
+     * @throws UserStoreException  If this is called during the initial set up.
+     */
+    private void handleInitialSetupException(boolean initialSetup, Exception e, String errorCode, String message,
+                                             String warnMessage)
+            throws UserStoreException {
+
+        if (initialSetup) {
+            if (errorCode.equals(((UserStoreException) e).getErrorCode())) {
+                log.warn(warnMessage);
+            } else {
+                throw new UserStoreException(message, e);
+            }
+        } else {
+            log.error(message, e);
+        }
+    }
+
+    /**
+     * Checks whether a group exists.
+     *
+     * @param isReadGroupEnabled   A flag to indicate whether read groups is enabled.
+     * @param adminGroupName       The group being checked for.
+     * @return                     true if the groups exists and false otherwise.
+     */
+    private boolean doesGroupExist(boolean isReadGroupEnabled, String adminGroupName) {
+
+        // Check whether the admin group exists in the user store.
+        boolean groupExist = false;
+        if (isReadGroupEnabled) {
+            try {
+                groupExist = doCheckExistingRole(adminGroupName);
+            } catch (Exception e) {
+                log.warn(String.format("Error occurs while checking the existence of the %s group " +
+                        "in the user store.", adminGroupName), e);
+            }
+        }
+        return groupExist;
     }
 
     private void updateHybridRoleListOfUserInternal(boolean initialSetup, String adminRoleName, String adminUserID)
@@ -10161,10 +11079,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                                 ex.getMessage()), claim, claimValue, limit, offset, profileName);
                 throw ex;
             }
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("Pre listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            if (log.isDebugEnabled()) {
+                log.debug("Pre listener user list: " + filteredUserList + " for domain: " + extractedDomain);
+            }
         }
 
         List<String> userNamesFromUserStore;
@@ -10176,22 +11093,22 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         } else {
             userNamesFromUserStore = doGetUserList(claim, claimValue, profileName, limit,
                     offset, extractedDomain, userManager);
-            if (log.isDebugEnabled()) {
-                log.debug("Users from user store: " + extractedDomain + " : " + userNamesFromUserStore);
-            }
         }
 
         if (log.isDebugEnabled()) {
-            log.debug("Users from user store: " + extractedDomain + " : " + userNamesFromUserStore);
+            if (StringUtils.isNotEmpty(extractedDomain)) {
+                log.debug("Users from user store: " + extractedDomain + " : " + userNamesFromUserStore);
+            } else {
+                log.debug("Users from all the user stores: " + userNamesFromUserStore);
+            }
         }
         filteredUserList.addAll(userNamesFromUserStore);
 
         if (StringUtils.isNotEmpty(extractedDomain)) {
             handlePostGetUserList(claim, claimValue, filteredUserList, limit, offset, false);
-        }
-
-        if (log.isDebugEnabled()) {
-            log.debug("Post listener user list pagination: " + filteredUserList + " for domain: " + extractedDomain);
+            if (log.isDebugEnabled()) {
+                log.debug("Post listener user list pagination: " + filteredUserList + " for domain: " + extractedDomain);
+            }
         }
 
         return filteredUserList.toArray(new String[0]);
@@ -10596,8 +11513,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             if (log.isDebugEnabled()) {
                 log.debug("Authentication failure. Invalid username or password is provided.");
             }
-            handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+            handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getCode(),
+                    String.format(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getMessage(),
                             "Authentication failed"), userName, credential);
             throw new UserStoreException("Authentication failed. Invalid username or password.");
         }
@@ -10872,30 +11789,40 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 }
             } else {
                 // Domain is not provided. Try to authenticate with the current user store manager.
-                if (abstractUserStoreManager.isUniqueUserIdEnabled()) {
-                    authenticationResult = abstractUserStoreManager.doAuthenticateWithID(loginIdentifiers, credential);
-                } else {
-                    String userName = getUsernameByClaims(loginIdentifiers);
-                    String userID = userUniqueIDManger.getUniqueId(userName, abstractUserStoreManager);
-                    boolean status = abstractUserStoreManager.doAuthenticate(userName, credential);
-                    if (status) {
-                        User user = getUser(userID, userName);
-                        authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.SUCCESS);
-                        authenticationResult.setAuthenticatedUser(user);
-                    } else {
-                        authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.FAIL);
-                        authenticationResult.setFailureReason(new FailureReason("Authentication failed."));
+                // Validate whether circuit breaker is enabled and open.
+                if (abstractUserStoreManager.isCircuitBreakerEnabledAndOpen()) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Avoiding searching the " + abstractUserStoreManager.getMyDomainName()
+                                + " domain as Circuit Breaker is in open state");
                     }
-                }
+                    authenticated = false;
+                } else {
 
-                if (authenticationResult.getAuthenticationStatus()
-                        == AuthenticationResult.AuthenticationStatus.SUCCESS) {
-                    authenticated = true;
-                }
-                if (authenticated) {
-                    // Set domain in thread local variable for subsequent operations
-                    UserCoreUtil
-                            .setDomainInThreadLocal(UserCoreUtil.getDomainName(abstractUserStoreManager.realmConfig));
+                    if (abstractUserStoreManager.isUniqueUserIdEnabled()) {
+                        authenticationResult = abstractUserStoreManager.doAuthenticateWithID(loginIdentifiers, credential);
+                    } else {
+                        String userName = getUsernameByClaims(loginIdentifiers);
+                        String userID = userUniqueIDManger.getUniqueId(userName, abstractUserStoreManager);
+                        boolean status = abstractUserStoreManager.doAuthenticate(userName, credential);
+                        if (status) {
+                            User user = getUser(userID, userName);
+                            authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.SUCCESS);
+                            authenticationResult.setAuthenticatedUser(user);
+                        } else {
+                            authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.FAIL);
+                            authenticationResult.setFailureReason(new FailureReason("Authentication failed."));
+                        }
+                    }
+
+                    if (authenticationResult.getAuthenticationStatus()
+                            == AuthenticationResult.AuthenticationStatus.SUCCESS) {
+                        authenticated = true;
+                    }
+                    if (authenticated) {
+                        // Set domain in thread local variable for subsequent operations
+                        UserCoreUtil
+                                .setDomainInThreadLocal(UserCoreUtil.getDomainName(abstractUserStoreManager.realmConfig));
+                    }
                 }
             }
         } finally {
@@ -10922,8 +11849,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
 
         if (!authenticated) {
-            handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+            handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getCode(),
+                    String.format(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getMessage(),
                             "Authentication failed"), loginIdentifiers, credential);
         }
 
@@ -11141,8 +12068,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 if (log.isDebugEnabled()) {
                     log.debug("Authentication failure. Invalid username or password is provided.");
                 }
-                handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                        String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+                handleOnAuthenticateFailure(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getCode(),
+                        String.format(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getMessage(),
                                 "Authentication failed"), preferredUserNameValue, credential);
                 throw new UserStoreException("Authentication failed. Invalid username or password.");
             }
@@ -11207,7 +12134,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         UserStore userStore = abstractUserStoreManager.getUserStore(preferredUserNameValue);
         if (userStore.isRecurssive() && userStore.getUserStoreManager() instanceof AbstractUserStoreManager) {
             return ((AbstractUserStoreManager) userStore.getUserStoreManager())
-                    .authenticateWithID(preferredUserNameClaim, userStore.getDomainFreeName(), credential, profileName);
+                    .authenticateWithID(preferredUserNameClaim, userStore.getDomainFreeName(), credential, profileName,
+                            domainProvided);
         }
 
         Secret credentialObj;
@@ -11236,12 +12164,15 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                         .authenticateWithID(preferredUserNameClaim, preferredUserNameValue, credentialArgument,
                                 abstractUserStoreManager)) {
                     handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                            ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(), preferredUserNameClaim,
+                            String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+                            StringUtils.EMPTY), preferredUserNameClaim,
                             preferredUserNameValue, credentialArgument);
 
                     authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.FAIL);
                     authenticationResult.setFailureReason(
-                            new FailureReason(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage()));
+                            new FailureReason(String.format(
+                                    ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+                                    StringUtils.EMPTY)));
                     return authenticationResult;
                 }
             }
@@ -11311,42 +12242,60 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             // domain name provided with user name.
 
             try {
-                String preferredUserNameProperty = claimManager
-                        .getAttributeName(getMyDomainName(), preferredUserNameClaim);
+                String preferredUserNameProperty = abstractUserStoreManager.getClaimManager()
+                        .getAttributeName(abstractUserStoreManager.getMyDomainName(), preferredUserNameClaim);
                 // Let's authenticate with the primary UserStoreManager.
 
-                if (abstractUserStoreManager.isUniqueUserIdEnabled()) {
+                // Validate whether circuit breaker is enabled and open.
+                if (abstractUserStoreManager.isCircuitBreakerEnabledAndOpen()) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Avoiding searching the " + abstractUserStoreManager.getMyDomainName()
+                                + " domain as Circuit Breaker is in open state");
+                    }
+                    authenticated = false;
+                } else {
+                    if (abstractUserStoreManager.isUniqueUserIdEnabled()) {
                     authenticationResult = abstractUserStoreManager
                             .doAuthenticateWithID(preferredUserNameProperty, preferredUserNameValue, credentialObj,
                                     profileName);
-                } else {
-                    List<String> users = doGetUserList(preferredUserNameClaim, preferredUserNameValue, profileName,
-                            abstractUserStoreManager.getMyDomainName(), abstractUserStoreManager);
-                    if (users.size() != 1) {
-                        String message = "Users count matching to claim: " + preferredUserNameClaim + " and value: "
-                                + preferredUserNameValue + " is: " + users.size();
-                        authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.FAIL);
-                        authenticationResult.setFailureReason(new FailureReason(message));
-                        if (log.isDebugEnabled()) {
-                            log.debug(message);
-                        }
                     } else {
-                        boolean status = abstractUserStoreManager.doAuthenticate(users.get(0), credentialObj);
-                        authenticationResult = new AuthenticationResult(status ?
-                                AuthenticationResult.AuthenticationStatus.SUCCESS :
-                                AuthenticationResult.AuthenticationStatus.FAIL);
-                        if (status) {
-                            String userID = userUniqueIDManger.getUniqueId(users.get(0), this);
-                            User user = userUniqueIDManger.getUser(userID, this);
-                            authenticationResult.setAuthenticatedUser(user);
+                    List<String> users = new ArrayList<>();
+                        if (preferredUserNameProperty.equals(getUserNameMappedAttribute())) {
+                            users.add(UserCoreUtil.addDomainToName(preferredUserNameValue,
+                                    abstractUserStoreManager.getMyDomainName()));
                         } else {
-                            authenticationResult.setFailureReason(new FailureReason("Invalid credentials."));
+                            users = doGetUserList(preferredUserNameClaim, preferredUserNameValue, profileName,
+                                    abstractUserStoreManager.getMyDomainName(), abstractUserStoreManager);
+                        }
+                        if (users.size() != 1) {
+                            String message = "Users count matching to claim: " + preferredUserNameClaim + " and value: "
+                                    + preferredUserNameValue + " is: " + users.size();
+                            authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.FAIL);
+                            authenticationResult.setFailureReason(new FailureReason(message));
+                            if (log.isDebugEnabled()) {
+                                log.debug(message);
+                            }
+                        } else {
+                            boolean status = abstractUserStoreManager.doAuthenticate(UserCoreUtil.removeDomainFromName(
+                                    users.get(0)), credentialObj);
+                            authenticationResult = new AuthenticationResult(status ?
+                                    AuthenticationResult.AuthenticationStatus.SUCCESS :
+                                    AuthenticationResult.AuthenticationStatus.FAIL);
+                            if (status) {
+                                String userID = userUniqueIDManger.getUniqueId(users.get(0), this);
+                                User user = userUniqueIDManger.
+                                        getUser(userID, this, abstractUserStoreManager.getMyDomainName());
+                                user.setTenantDomain(getTenantDomain(tenantId));
+                                authenticationResult.setAuthenticatedUser(user);
+                            } else {
+                                authenticationResult.setFailureReason(new FailureReason("Invalid credentials."));
+                            }
                         }
                     }
-                }
-                if (authenticationResult.getAuthenticationStatus()
-                        == AuthenticationResult.AuthenticationStatus.SUCCESS) {
-                    authenticated = true;
+                    if (authenticationResult.getAuthenticationStatus()
+                            == AuthenticationResult.AuthenticationStatus.SUCCESS) {
+                        authenticated = true;
+                    }
                 }
             } catch (Exception e) {
                 handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
@@ -11391,8 +12340,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
 
         if (!authenticated) {
-            handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+            handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getCode(),
+                    String.format(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getMessage(),
                             "Authentication failed"), preferredUserNameClaim, preferredUserNameValue, credential);
         }
 
@@ -11576,39 +12525,48 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 throw new UserStoreException("Error while trying to check tenant status for Tenant : " + tenantId, e);
             }
 
-            if (isUniqueUserIdEnabled(abstractUserStoreManager)) {
-                authenticationResult = ((AbstractUserStoreManager) abstractUserStoreManager)
-                        .doAuthenticateWithID(userID, credential);
-            } else {
-                User user = userUniqueIDManger
-                        .getUser(userID, (AbstractUserStoreManager) abstractUserStoreManager);
-                boolean status = ((AbstractUserStoreManager) abstractUserStoreManager)
-                        .doAuthenticate(user.getUsername(), credential);
-                if (status) {
-                    authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.SUCCESS);
-                    authenticationResult.setAuthenticatedUser(user);
-                } else {
-                    authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.FAIL);
-                    authenticationResult
-                            .setFailureReason(new FailureReason("Authentication failed for userID: " + userID));
+            // Validate whether circuit breaker is enabled and open.
+            if (abstractUserStoreManager.isCircuitBreakerEnabledAndOpen()) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Avoiding searching the " + abstractUserStoreManager.getMyDomainName()
+                            + " domain as Circuit Breaker is in open state");
                 }
-            }
-
-            if (authenticationResult.getAuthenticationStatus()
-                    == AuthenticationResult.AuthenticationStatus.SUCCESS) {
-                authenticated = true;
-            }
-            if (authenticated) {
-                // Set domain in thread local variable for subsequent operations
-                UserCoreUtil.setDomainInThreadLocal(userStoreWithID.getDomainName());
+                authenticated = false;
+            } else {
+                if (isUniqueUserIdEnabled(abstractUserStoreManager)) {
+                    authenticationResult = ((AbstractUserStoreManager) abstractUserStoreManager)
+                            .doAuthenticateWithID(userID, credential);
+                } else {
+                    User user = userUniqueIDManger
+                            .getUser(userID, (AbstractUserStoreManager) abstractUserStoreManager);
+                    boolean status = ((AbstractUserStoreManager) abstractUserStoreManager)
+                            .doAuthenticate(user.getUsername(), credential);
+                    if (status) {
+                        user.setTenantDomain(getTenantDomain(tenantId));
+                        authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.SUCCESS);
+                        authenticationResult.setAuthenticatedUser(user);
+                    } else {
+                        authenticationResult.setAuthenticationStatus(AuthenticationResult.AuthenticationStatus.FAIL);
+                        authenticationResult
+                                .setFailureReason(new FailureReason("Authentication failed for userID: " + userID));
+                    }
+                }
+                if (authenticationResult.getAuthenticationStatus()
+                        == AuthenticationResult.AuthenticationStatus.SUCCESS) {
+                    authenticated = true;
+                }
+                if (authenticated) {
+                    // Set domain in thread local variable for subsequent operations
+                    UserCoreUtil.setDomainInThreadLocal(userStoreWithID.getDomainName());
+                }
             }
         } finally {
             credentialObj.clear();
         }
 
         if (!authenticated) {
-            handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getCode(),
-                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_AUTHENTICATION.getMessage(),
+            handleOnAuthenticateFailureWithID(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getCode(),
+                    String.format(ErrorMessages.ERROR_CODE_ERROR_INCORRECT_CREDENTIAL.getMessage(),
                             "Authentication failed"), userID, credential);
         }
 
@@ -11772,7 +12730,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (isUniqueIdEnabled) {
             isUserExists = doCheckExistingUserWithID(userID);
         } else {
-            user = userUniqueIDManger.getUser(userID, this);
+            user = userUniqueIDManger.getUser(userID, this, userStore.getDomainName());
             isUserExists = user != null;
         }
 
@@ -11793,7 +12751,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             // If unique id feature is not enabled, we have to call the legacy methods.
             if (!isUniqueUserIdEnabledInUserStore(userStore)) {
                 if (user == null) {
-                    user = userUniqueIDManger.getUser(userID, this);
+                    user = userUniqueIDManger.getUser(userID, this, userStore.getDomainName());
                 }
             } else {
                 user = getUserFromID(userID, requestedClaims, userStore.getDomainName(), profileName);
@@ -12062,6 +13020,74 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     }
 
     @Override
+    public final List<User> getUserListOfGroupWithID(String groupName) throws UserStoreException {
+
+        if (!isSecureCall.get()) {
+            Class argTypes[] = new Class[]{String.class};
+            Object object = callSecure("getUserListOfGroupWithID", new Object[]{groupName}, argTypes);
+            return (List<User>) object;
+        }
+
+        return getUserListOfGroupWithID(groupName, QUERY_FILTER_STRING_ANY, QUERY_MAX_ITEM_LIMIT_ANY);
+    }
+
+    @Override
+    public final List<User> getUserListOfGroupWithID(String groupName, String filter, int maxItemLimit)
+            throws UserStoreException {
+
+        if (!isSecureCall.get()) {
+            Class argTypes[] = new Class[]{String.class, String.class, int.class};
+            Object object = callSecure("getUserListOfGroupWithID", new Object[]{groupName, filter, maxItemLimit},
+                    argTypes);
+            return (List<User>) object;
+        }
+
+        List<User> users = new ArrayList<>();
+
+        // If group does not exit, just return
+        if (!isExistingRole(groupName)) {
+            handleDoPostGetUserListOfRoleWithID(groupName, users);
+            return users;
+        }
+
+        UserStore userStore = getUserStoreOfRoles(groupName);
+
+        if (userStore.isRecurssive()) {
+            UserStoreManager resolvedUserStoreManager = userStore.getUserStoreManager();
+            if (resolvedUserStoreManager instanceof AbstractUserStoreManager) {
+                return ((AbstractUserStoreManager) resolvedUserStoreManager)
+                        .getUserListOfGroupWithID(userStore.getDomainFreeName(), filter, maxItemLimit);
+            } else {
+                return ((UniqueIDUserStoreManager) resolvedUserStoreManager)
+                        .getUserListOfGroupWithID(userStore.getDomainFreeName());
+            }
+        }
+
+        // #################### Domain Name Free Zone Starts Here ################################
+
+        if (userStore.isSystemStore() || userStore.isHybridRole()) {
+            // If the passed group is a role and if role, group separation is not enabled,
+            // call the user listing method for roles.
+            if (!isRoleAndGroupSeparationEnabled()) {
+                return getUserListOfRoleWithID(groupName, filter, maxItemLimit);
+            }
+            // If the passed group is a role and if role, group separation is enabled, just return.
+            return users;
+        }
+
+        if (readGroupsEnabled) {
+            // If unique id feature is not enabled, we have to call the legacy methods.
+            if (!isUniqueUserIdEnabledInUserStore(userStore)) {
+                users = userUniqueIDManger.listUsers(doGetUserListOfRole(groupName, filter, maxItemLimit), this);
+            } else {
+                users = doGetUserListOfRoleWithID(groupName, filter, maxItemLimit);
+            }
+            handleDoPostGetUserListOfRoleWithID(groupName, users);
+        }
+        return users;
+    }
+
+    @Override
     public final String getUserClaimValueWithID(String userID, String claim, String profileName)
             throws UserStoreException {
 
@@ -12181,8 +13207,12 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         User user = null;
         if (isUniqueIdEnabled) {
             isUserExists = doCheckExistingUserWithID(userID);
-        } else{
-            user = userUniqueIDManger.getUser(userID, this);
+        } else {
+            if (userStore != null && StringUtils.isNotBlank(userStore.getDomainName())) {
+                user = userUniqueIDManger.getUser(userID, this, userStore.getDomainName());
+            } else {
+                user = userUniqueIDManger.getUser(userID, this);
+            }
             isUserExists = user != null;
         }
 
@@ -12544,6 +13574,31 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
         // #################### <Listeners> #####################################################
         try {
+            // This user name here is domain-less.
+            // We directly authenticate user against the selected UserStoreManager.
+
+            AuthenticationResult authenticationResult;
+            try {
+                if (!isUniqueUserIdEnabledInUserStore(userStore)) {
+                    User user = userUniqueIDManger.getUser(userID, this);
+                    boolean auth = this.doAuthenticate(user.getUsername(), oldCredentialObj);
+                    authenticationResult = new AuthenticationResult(auth ?
+                            AuthenticationResult.AuthenticationStatus.SUCCESS :
+                            AuthenticationResult.AuthenticationStatus.FAIL);
+                } else {
+                    authenticationResult = this.doAuthenticateWithID(userID, oldCredentialObj);
+                }
+            } catch (org.wso2.carbon.user.api.UserStoreException e) {
+                throw new UserStoreException(e);
+            }
+
+            if (authenticationResult.getAuthenticationStatus() != AuthenticationResult.AuthenticationStatus.SUCCESS) {
+                handleUpdateCredentialFailureWithID(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getCode(),
+                        ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getMessage(), userID, newCredential,
+                        oldCredential);
+                throw new UserStoreException(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.toString());
+            }
+
             try {
 
                 for (UserOperationEventListener listener : UMListenerServiceComponent
@@ -12569,96 +13624,70 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             }
             // #################### </Listeners> #####################################################
 
-            // This user name here is domain-less.
-            // We directly authenticate user against the selected UserStoreManager.
+            if (!checkUserPasswordValid(newCredential)) {
+                String errorMsg = realmConfig.getUserStoreProperty(PROPERTY_PASSWORD_ERROR_MSG);
 
-            AuthenticationResult authenticationResult;
-            try {
-                if (!isUniqueUserIdEnabledInUserStore(userStore)) {
-                    User user = userUniqueIDManger.getUser(userID, this);
-                    boolean auth = this.doAuthenticate(user.getUsername(), oldCredentialObj);
-                    authenticationResult = new AuthenticationResult(auth ?
-                            AuthenticationResult.AuthenticationStatus.SUCCESS :
-                            AuthenticationResult.AuthenticationStatus.FAIL);
-                } else {
-                    authenticationResult = this.doAuthenticateWithID(userID, oldCredentialObj);
-                }
-            } catch (org.wso2.carbon.user.api.UserStoreException e) {
-                throw new UserStoreException(e);
-            }
-
-            if (authenticationResult.getAuthenticationStatus() == AuthenticationResult.AuthenticationStatus.SUCCESS) {
-                if (!checkUserPasswordValid(newCredential)) {
-                    String errorMsg = realmConfig.getUserStoreProperty(PROPERTY_PASSWORD_ERROR_MSG);
-
-                    if (errorMsg != null) {
-                        String errorMessage = String
-                                .format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getMessage(),
-                                        errorMsg);
-                        String errorCode = ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getCode();
-                        handleUpdateCredentialFailureWithID(errorCode, errorMessage, userID, newCredential,
-                                oldCredential);
-                        throw new UserStoreException(errorCode + " - " + errorMessage);
-                    }
-
-                    String errorMessage = String.format(ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getMessage(),
-                            realmConfig.getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_JAVA_REG_EX));
-                    String errorCode = ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getCode();
-                    handleUpdateCredentialFailureWithID(errorCode, errorMessage, userID, newCredential, oldCredential);
+                if (errorMsg != null) {
+                    String errorMessage = String
+                            .format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getMessage(),
+                                    errorMsg);
+                    String errorCode = ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_UPDATE_CREDENTIAL.getCode();
+                    handleUpdateCredentialFailureWithID(errorCode, errorMessage, userID, newCredential,
+                            oldCredential);
                     throw new UserStoreException(errorCode + " - " + errorMessage);
                 }
 
-                try {
-                    // If unique id feature is not enabled, we have to call the legacy methods.
-                    if (!isUniqueUserIdEnabledInUserStore(userStore)) {
-                        User user = userUniqueIDManger.getUser(userID, this);
-                        // If we don't have a record for this user, let's try to call directly using the user id.
-                        if (user == null) {
-                            updateCredential(userID, newCredential, oldCredential);
-                        } else {
-                            updateCredential(user.getUsername(), newCredential, oldCredential);
-                        }
-                    } else {
-                        this.doUpdateCredentialWithID(userID, newCredentialObj, oldCredentialObj);
-                    }
-                } catch (UserStoreException ex) {
-                    handleUpdateCredentialFailureWithID(
-                            ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getCode(),
-                            String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getMessage(),
-                                    ex.getMessage()), userID, newCredential, oldCredential);
-                    throw ex;
-                }
-
-                // #################### <Listeners> ##################################################
-                try {
-                    for (UserOperationEventListener listener : UMListenerServiceComponent
-                            .getUserOperationEventListeners()) {
-                        if (listener instanceof AbstractUserOperationEventListener &&
-                                !((AbstractUserOperationEventListener) listener)
-                                        .doPostUpdateCredentialWithID(userID, newCredential, this)) {
-                            handleUpdateCredentialFailureWithID(
-                                    ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
-                                    String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL
-                                            .getMessage(), "Post update credential tasks failed"), userID,
-                                    newCredential, oldCredential);
-                            return;
-                        }
-                    }
-                } catch (UserStoreException ex) {
-                    handleUpdateCredentialFailureWithID(
-                            ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
-                            String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getMessage(),
-                                    ex.getMessage()), userID, newCredential, oldCredential);
-                    throw ex;
-                }
-                // #################### </Listeners> ##################################################
-
-            } else {
-                handleUpdateCredentialFailureWithID(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getCode(),
-                        ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.getMessage(), userID, newCredential,
-                        oldCredential);
-                throw new UserStoreException(ErrorMessages.ERROR_CODE_OLD_CREDENTIAL_DOES_NOT_MATCH.toString());
+                String errorMessage = String.format(ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getMessage(),
+                        realmConfig.getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_JAVA_REG_EX));
+                String errorCode = ErrorMessages.ERROR_CODE_INVALID_PASSWORD.getCode();
+                handleUpdateCredentialFailureWithID(errorCode, errorMessage, userID, newCredential, oldCredential);
+                throw new UserStoreException(errorCode + " - " + errorMessage);
             }
+
+            try {
+                // If unique id feature is not enabled, we have to call the legacy methods.
+                if (!isUniqueUserIdEnabledInUserStore(userStore)) {
+                    User user = userUniqueIDManger.getUser(userID, this);
+                    // If we don't have a record for this user, let's try to call directly using the user id.
+                    if (user == null) {
+                        updateCredential(userID, newCredential, oldCredential);
+                    } else {
+                        updateCredential(user.getUsername(), newCredential, oldCredential);
+                    }
+                } else {
+                    this.doUpdateCredentialWithID(userID, newCredentialObj, oldCredentialObj);
+                }
+            } catch (UserStoreException ex) {
+                handleUpdateCredentialFailureWithID(
+                        ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getCode(),
+                        String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_UPDATING_CREDENTIAL.getMessage(),
+                                ex.getMessage()), userID, newCredential, oldCredential);
+                throw ex;
+            }
+
+            // #################### <Listeners> ##################################################
+            try {
+                for (UserOperationEventListener listener : UMListenerServiceComponent
+                        .getUserOperationEventListeners()) {
+                    if (listener instanceof AbstractUserOperationEventListener &&
+                            !((AbstractUserOperationEventListener) listener)
+                                    .doPostUpdateCredentialWithID(userID, newCredential, this)) {
+                        handleUpdateCredentialFailureWithID(
+                                ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
+                                String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL
+                                        .getMessage(), "Post update credential tasks failed"), userID,
+                                newCredential, oldCredential);
+                        return;
+                    }
+                }
+            } catch (UserStoreException ex) {
+                handleUpdateCredentialFailureWithID(
+                        ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getCode(),
+                        String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_POST_UPDATE_CREDENTIAL.getMessage(),
+                                ex.getMessage()), userID, newCredential, oldCredential);
+                throw ex;
+            }
+            // #################### </Listeners> ##################################################
         } finally {
             newCredentialObj.clear();
             oldCredentialObj.clear();
@@ -12687,6 +13716,11 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (userName == null) {
             userName = getUserNameFromUserID(userID);
         }
+
+        if (StringUtils.isEmpty(userID) && StringUtils.isEmpty(userName)) {
+            throw new UserStoreClientException("User not found in the cache or database");
+        }
+
         if (StringUtils.isNotEmpty(userName) && userName.contains(UserCoreConstants.DOMAIN_SEPARATOR)) {
             domain = UserCoreUtil.extractDomainFromName(userName);
             userName = UserCoreUtil.removeDomainFromName(userName);
@@ -12694,6 +13728,11 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         User user = new User(userID, userName, userName);
         user.setTenantDomain(getTenantDomain(tenantId));
         user.setUserStoreDomain(domain);
+
+        if (StringUtils.isNotEmpty(userID) &&
+                StringUtils.isEmpty(userUniqueIDDomainResolver.getDomainForUserId(userID, tenantId))) {
+            userUniqueIDDomainResolver.setDomainForUserIdIfNotExists(userID, domain, tenantId);
+        }
         return user;
     }
 
@@ -12757,22 +13796,35 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         }
         userName = userStore.getDomainFreeName();
         String userID = getFromUserIDCache(userName, userStore);
-        if (StringUtils.isEmpty(userID)) {
-            if (isUniqueUserIdEnabledInUserStore(userStore)) {
-                userID = doGetUserIDFromUserNameWithID(userName);
-                addToUserIDCache(userID, userName, userStore);
-                addToUserNameCache(userID, userName, userStore);
-                return userID;
+        // Validate whether circuit breaker is enabled and open.
+        if (((AbstractUserStoreManager) userStore.getUserStoreManager()).isCircuitBreakerEnabledAndOpen()) {
+            if (log.isDebugEnabled()) {
+                log.debug("Avoiding user listing as the Circuit Breaker is in open state for domain: "
+                        + userStore.getDomainName());
             }
+            return null;
+        } else {
+            if (StringUtils.isEmpty(userID)) {
+                if (isUniqueUserIdEnabledInUserStore(userStore)) {
+                    userID = doGetUserIDFromUserNameWithID(userName);
+                    if (StringUtils.isEmpty(userID)) {
+                        log.debug("User is not available in cache or database.");
+                        return null;
+                    }
+                    addToUserIDCache(userID, userName, userStore);
+                    addToUserNameCache(userID, userName, userStore);
+                    return userID;
+                }
 
-            Map<String, String> claims = doGetUserClaimValues(userName,
-                    new String[]{UserCoreClaimConstants.USER_ID_CLAIM_URI},
-                    userStore.getDomainName(), null);
-            if (claims != null && claims.size() == 1) {
-                userID = claims.get(UserCoreClaimConstants.USER_ID_CLAIM_URI);
-                addToUserIDCache(userID, userName, userStore);
-                addToUserNameCache(userID, userName, userStore);
-                return userID;
+                Map<String, String> claims = doGetUserClaimValues(userName,
+                        new String[]{USER_ID_CLAIM_URI},
+                        userStore.getDomainName(), null);
+                if (claims != null && claims.size() == 1) {
+                    userID = claims.get(USER_ID_CLAIM_URI);
+                    addToUserIDCache(userID, userName, userStore);
+                    addToUserNameCache(userID, userName, userStore);
+                    return userID;
+                }
             }
         }
         return userID;
@@ -12832,7 +13884,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (isUniqueUserIdEnabledInUserStore(userStore)) {
             return getUserNameFromCurrentUserStore(userID, userStore);
         } else {
-            return userUniqueIDManger.getUser(userID, this).getDomainQualifiedUsername();
+            return userUniqueIDManger.getUser(userID, this, userStore.getDomainName()).getDomainQualifiedUsername();
         }
     }
 
@@ -12879,6 +13931,13 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         String groupWithDomain = UserCoreUtil.addDomainToName(groupName, domainName);
         GroupIdResolverCache.getInstance().addToCache(groupId, groupWithDomain,
                 RESOLVE_GROUP_NAME_FROM_USER_ID_CACHE_NAME, tenantId);
+    }
+
+    private void clearGroupIDResolverCache(String groupId, int tenantId) {
+
+        GroupIdResolverCache.getInstance()
+                .clearCacheEntry(groupId, RESOLVE_GROUP_NAME_FROM_USER_ID_CACHE_NAME, tenantId);
+
     }
 
     private String getFromUserIDCache(String userName, UserStore userStore) {
@@ -12962,6 +14021,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
         List<String> userNames = new ArrayList<>();
         for (String userID : userIDs) {
+            if (StringUtils.isBlank(userID)) {
+                continue;
+            }
             userNames.add(getUserNameFromUserID(userID));
         }
         return userNames;
@@ -13111,7 +14173,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (claims == null) {
             claims = new HashMap<>();
         }
-        claims.put(UserCoreClaimConstants.USER_ID_CLAIM_URI, userID);
+        claims.put(USER_ID_CLAIM_URI, userID);
         return claims;
     }
 
@@ -13279,7 +14341,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (isUniqueIdEnabled) {
             isUserExists = doCheckExistingUserWithID(userID);
         } else {
-            user = userUniqueIDManger.getUser(userID, this);
+            user = userUniqueIDManger.getUser(userID, this, userStore.getDomainName());
             isUserExists = user != null;
         }
 
@@ -13759,6 +14821,9 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             }
         } finally {
             newCredentialObj.clear();
+            // This value is set in the validation lister if the password gets validated
+            // against the configured set of rules.
+            UserCoreUtil.removeSkipPasswordPatternValidationThreadLocal();
         }
         // #################### </Listeners> #####################################################
 
@@ -14549,6 +15614,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         if (deletedUserIDs.length > 0 || newUserIDs.length > 0) {
             if (!isReadOnly() && writeGroupsEnabled) {
                 try {
+                    // No need to check for group unique id feature here. Because any userstore should have this
+                    // feature OOTB.
                     doUpdateUserListOfRoleWithID(userStore.getDomainFreeName(),
                             UserCoreUtil.removeDomainFromNames(deletedUserIDs),
                             UserCoreUtil.removeDomainFromNames(newUserIDs));
@@ -14897,6 +15964,7 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             // #################### </Post-Listeners> #####################################################
         } finally {
             UserCoreUtil.removeSkipPasswordPatternValidationThreadLocal();
+            UserCoreUtil.removeSkipUsernamePatternValidationThreadLocal();
             credentialObj.clear();
         }
 
@@ -15004,7 +16072,13 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     List<User> users = userUniqueIDManger.getUsers(Arrays.asList(userIDList), this);
                     doAddRole(roleName, users.stream().map(User::getUsername).toArray(String[]::new), isSharedRole);
                 } else {
-                    doAddRoleWithID(roleName, userIDList, isSharedRole);
+                    if (isUniqueGroupIdEnabled()) {
+                        Group group = doAddGroup(roleName, generateGroupUUID(), Arrays.asList(userIDList), null);
+                        groupUniqueIDDomainResolver.setDomainForGroupId(group.getGroupID(), getMyDomainName(), tenantId,
+                                false);
+                    } else {
+                        doAddRoleWithID(roleName, userIDList, isSharedRole);
+                    }
                 }
                 roleWithDomain = UserCoreUtil.addDomainToName(roleName, getMyDomainName());
             } catch (UserStoreException ex) {
@@ -15094,6 +16168,75 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     }
 
     /**
+     * This method is responsible for calling relevant preAddGroup listener methods before adding a group.
+     *
+     * @param groupName Name of the group.
+     * @param userIds   List of users.
+     * @param claims    List of claims.
+     * @return True if all the listeners are executed successfully.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private boolean handlePreAddGroup(String groupName, List<String> userIds,
+                                      List<org.wso2.carbon.user.core.common.Claim> claims) throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent
+                    .getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.preAddGroup(groupName, userIds, claims, this)) {
+                        handlePreAddGroupFailure(ErrorMessages.ERROR_DURING_PRE_ADD_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_PRE_ADD_GROUP.getMessage(),
+                                        UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), groupName, userIds,
+                                claims);
+                        return false;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleAddGroupFailure(ErrorMessages.ERROR_DURING_PRE_ADD_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_PRE_ADD_GROUP.getMessage(), ex.getMessage()), groupName,
+                    null, userIds, claims);
+            throw ex;
+        }
+        return true;
+    }
+
+    /**
+     * This method is responsible for calling relevant postAddGroup listener methods after successfully adding a group.
+     *
+     * @param groupName Name of the group.
+     * @param groupId   Id of the group.
+     * @param userIds   List of users.
+     * @param claims    List of claims.
+     * @throws UserStoreException Exception that will be thrown by relevant listeners.
+     */
+    private void handlePostAddGroup(String groupName, String groupId, List<String> userIds,
+                                    List<org.wso2.carbon.user.core.common.Claim> claims) throws UserStoreException {
+
+        try {
+            for (GroupOperationEventListener listener : UMListenerServiceComponent
+                    .getGroupOperationEventListeners()) {
+                if (listener instanceof AbstractGroupOperationEventListener) {
+                    AbstractGroupOperationEventListener newListener = (AbstractGroupOperationEventListener) listener;
+                    if (!newListener.postAddGroup(groupName, groupId, userIds, claims, this)) {
+                        handlePostAddGroupFailure(ErrorMessages.ERROR_DURING_POST_ADD_GROUP.getCode(),
+                                String.format(ErrorMessages.ERROR_DURING_POST_ADD_GROUP.getMessage(),
+                                        UserCoreErrorConstants.POST_LISTENER_TASKS_FAILED_MESSAGE), groupName, groupId,
+                                userIds, claims);
+                        return;
+                    }
+                }
+            }
+        } catch (UserStoreException ex) {
+            handleAddGroupFailure(ErrorMessages.ERROR_DURING_POST_ADD_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_DURING_POST_ADD_GROUP.getMessage(), ex.getMessage()), groupName,
+                    groupId, userIds, claims);
+            throw ex;
+        }
+    }
+
+    /**
      * Handle pre add role tasks.
      */
     private boolean handlePreAddRoleWithID(String roleName, String[] userList, Permission[] permissions,
@@ -15120,7 +16263,6 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     success = ((UniqueIDUserOperationEventListener) listener)
                             .doPreAddRoleWithID(roleName, userList, permissions, this);
                 }
-
                 if (!success) {
                     handleAddRoleFailureWithID(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_ADD_ROLE.getCode(),
                             String.format(ErrorMessages.ERROR_CODE_ERROR_DURING_PRE_ADD_ROLE.getMessage(),
@@ -15546,7 +16688,11 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                     offset, extractedDomain, userManager), this);
         }
         if (log.isDebugEnabled()) {
-            log.debug("Users from user store: " + extractedDomain + " : " + usersFromUserStore);
+            if (StringUtils.isNotEmpty(extractedDomain)) {
+                log.debug("Users from user store: " + extractedDomain + " : " + usersFromUserStore);
+            }  else {
+                log.debug("Users from all the user stores: " + usersFromUserStore);
+            }
         }
         filteredUserList.addAll(usersFromUserStore);
 
@@ -16095,8 +17241,8 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
             for (ExpressionCondition expressionCondition : expressionConditions) {
                 List<org.wso2.carbon.user.api.ClaimMapping> mappedClaim =
-                        Arrays.stream(claimMapping).filter(mapping -> mapping.getMappedAttribute()
-                                        .equals(expressionCondition.getAttributeName())).collect(Collectors.toList());
+                        Arrays.stream(claimMapping).filter(mapping -> Objects.equals(mapping.getMappedAttribute(),
+                                expressionCondition.getAttributeName())).collect(Collectors.toList());
 
                 //Obtaining relevant URI for the mapped attribute.
                 if (mappedClaim.size() == 1) {
@@ -16433,14 +17579,23 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
         Map<String, List<String>> domainAwareUsers = new HashMap<>();
         if (!userIDs.isEmpty()) {
             for (String userID : userIDs) {
-                User user = getUser(userID, null);
-                String domainName = user.getUserStoreDomain();
-                List<String> users = domainAwareUsers.get(domainName);
-                if (users == null) {
-                    users = new ArrayList<>();
-                    domainAwareUsers.put(domainName.toUpperCase(), users);
+                if (StringUtils.isBlank(userID)) {
+                    continue;
                 }
-                users.add(UserCoreUtil.removeDomainFromName(userID));
+                try {
+                    User user = getUser(userID, null);
+                    String domainName = user.getUserStoreDomain();
+                    List<String> users = domainAwareUsers.get(domainName);
+                    if (users == null) {
+                        users = new ArrayList<>();
+                        domainAwareUsers.put(domainName.toUpperCase(), users);
+                    }
+                    users.add(UserCoreUtil.removeDomainFromName(userID));
+                } catch (UserStoreClientException e) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Could not resolve the user for user id: " + userID);
+                    }
+                }
             }
         }
 
@@ -16655,14 +17810,172 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
                 "listGroups operation is not implemented in: " + this.getClass());
     }
 
+    /**
+     * Check whether the given group name contain system reserved domain name such as application or internal.
+     *
+     * @param groupName String group name.
+     * @return True if the group name contain system reserved domain name, false otherwise.
+     */
+    private boolean isInvalidGroupDomain(String groupName) {
+
+        return isAnInternalRole(groupName);
+    }
+
     @Override
-    public Group addGroup(String groupName, List<String> usersIDs, List<org.wso2.carbon.user.core.common.Claim> claims)
+    public Group addGroup(String groupName, List<String> usersIds, List<org.wso2.carbon.user.core.common.Claim> claims)
             throws UserStoreException {
 
-        if (log.isDebugEnabled()) {
-            log.debug("addGroup operation is not implemented in: " + this.getClass());
+        if (StringUtils.isEmpty(groupName)) {
+            String errorCode = ErrorMessages.ERROR_EMPTY_GROUP_NAME.getCode();
+            String errorMessage = ErrorMessages.ERROR_EMPTY_GROUP_NAME.getMessage();
+            handleAddGroupFailure(errorCode, errorMessage, groupName, null, usersIds, claims);
+            throw new UserStoreClientException(errorMessage, errorCode);
         }
-        throw new NotImplementedException("addGroup operation is not implemented in: " + this.getClass());
+        if (isInvalidGroupDomain(groupName)) {
+            String errorCode = ErrorMessages.ERROR_SYSTEM_RESERVED_DOMAIN_IN_GROUP.getCode();
+            String errorMessage = String.format(ErrorMessages.ERROR_SYSTEM_RESERVED_DOMAIN_IN_GROUP.getMessage(),
+                    groupName);
+            handleAddGroupFailure(errorCode, errorMessage, groupName, null, usersIds, claims);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        if (usersIds == null) {
+            usersIds = Collections.emptyList();
+        }
+        UserStore userStore = getUserStoreWithGroupName(groupName);
+        if (userStore.isRecurssive()) {
+            return ((UniqueIDUserStoreManager) userStore.getUserStoreManager())
+                    .addGroup(UserCoreUtil.removeDomainFromName(groupName),
+                            UserCoreUtil.removeDomainFromNames(usersIds), claims);
+        }
+        // #################### Domain Name Free Zone Starts Here ################################
+        claims = CollectionUtils.isEmpty(claims) ? new ArrayList<>() : claims;
+        // This happens only once during first startup - adding administrator user/group.
+        if (groupName.indexOf(CarbonConstants.DOMAIN_SEPARATOR) > 0) {
+            groupName = userStore.getDomainFreeName();
+            usersIds = UserCoreUtil.removeDomainFromNames(usersIds);
+        }
+
+        // #################### <Pre-Listeners> #####################################################
+        if (!handlePreAddGroup(groupName, usersIds, claims)) {
+            return null;
+        }
+        // Invoke legacy listeners to maintain backward compatibility.
+        if (!handlePreAddRoleWithID(groupName, usersIds.toArray(new String[0]), null, false)) {
+            return null;
+        }
+        // #################### </Pre-Listeners> #####################################################
+
+        // Check whether groups can be added.
+        if (isReadOnly()) {
+            String errorCode = ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getCode();
+            String errorMessage = ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getMessage();
+            handleAddGroupFailure(errorCode, errorMessage, groupName, null, usersIds, claims);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        if (!writeGroupsEnabled) {
+            String errorCode = ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getCode();
+            String errorMessage = ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getMessage();
+            handleAddGroupFailure(errorCode, errorMessage, groupName, null, usersIds, claims);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        // Perform validation on the name.
+        if (!isGroupNameValid(groupName)) {
+            String regEx = realmConfig
+                    .getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_ROLE_NAME_JAVA_REG_EX);
+            String errorMessage = String
+                    .format(ErrorMessages.ERROR_CODE_INVALID_GROUP_NAME.getMessage(), groupName, regEx);
+            String errorCode = ErrorMessages.ERROR_CODE_INVALID_GROUP_NAME.getCode();
+            handleAddGroupFailure(errorCode, errorMessage, groupName, null, usersIds, claims);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        if (doCheckExistingGroupName(groupName)) {
+            String errorCode = ErrorMessages.ERROR_CODE_GROUP_ALREADY_EXISTS.getCode();
+            String errorMessage = String.format(ErrorMessages.ERROR_CODE_GROUP_ALREADY_EXISTS.getMessage(), groupName);
+            handleAddGroupFailure(errorCode, errorMessage, groupName, null, usersIds, claims);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        Group group;
+        String groupId = generateGroupUUID();
+        if (isUniqueGroupIdEnabled(this)) {
+            if (!isUniqueUserIdEnabledInUserStore(userStore)) {
+                String errorCode = ErrorMessages.ERROR_CODE_GROUP_UUID_NOT_SUPPORTED.getCode();
+                String errorMessage = ErrorMessages.ERROR_CODE_GROUP_UUID_NOT_SUPPORTED.getMessage();
+                handleAddGroupFailure(errorCode, errorMessage, groupName, null, usersIds, claims);
+                throw new UserStoreException(errorCode + "-" + errorMessage);
+            }
+            group = doAddGroup(groupName, groupId, usersIds, buildClaimsList(claims));
+            groupUniqueIDDomainResolver.setDomainForGroupId(group.getGroupID(), getMyDomainName(), tenantId,
+                    false);
+        } else {
+            // Backward compatibility support. Use group resolver to update the other required places.
+            GroupResolver groupResolver = UserStoreMgtDataHolder.getInstance().getGroupResolver();
+            try {
+                group = groupResolver.addGroup(groupName, groupId, claims, this);
+                if (isUniqueUserIdEnabledInUserStore(userStore)) {
+                    doAddGroupWithUserIds(groupName, usersIds);
+                } else {
+                    List<User> users = userUniqueIDManger.getUsers(usersIds, this);
+                    doAddGroupWithUserNames(groupName,
+                            users.stream().map(User::getUsername).collect(Collectors.toList()));
+                }
+                // Update only the cache since the ID can be found in our side.
+                groupUniqueIDDomainResolver.setDomainForGroupId(group.getGroupID(), getMyDomainName(), tenantId,
+                        true);
+            } catch (UserStoreException e) {
+                log.debug("error occurred while adding group:" + groupName, e);
+                groupResolver.deleteGroupByName(groupName, this);
+                throw e;
+            }
+        }
+        updateClaimsWithGroupAttributes(group, claims);
+        // #################### <Post-Listeners> #####################################################
+        handlePostAddGroup(group.getGroupName(), group.getGroupID(), usersIds, claims);
+        // Invoke legacy listeners to maintain backward compatibility.
+        handlePostAddRoleWithID(groupName, usersIds.toArray(new String[0]), null, false);
+        // #################### </Post-Listeners> #####################################################
+        return group;
+    }
+
+    private Map<String, String> buildClaimsList(List<org.wso2.carbon.user.core.common.Claim> claims) {
+
+        Map<String, String> claimsMap = new HashMap<>();
+        for (org.wso2.carbon.user.core.common.Claim claim : claims) {
+            claimsMap.put(claim.getClaimUrl(), claim.getClaimValue());
+        }
+        return claimsMap;
+    }
+
+    private void updateClaimsWithGroupAttributes(Group group, List<org.wso2.carbon.user.core.common.Claim> claims) {
+
+        if (CollectionUtils.isEmpty(claims)) {
+            return;
+        }
+        List<org.wso2.carbon.user.core.common.Claim> groupClaims = group.getClaims();
+        for (org.wso2.carbon.user.core.common.Claim claim : claims) {
+            String claimUrl = claim.getClaimUrl();
+            switch (claimUrl) {
+                case LOCATION_CLAIM_URI:
+                    claim.setClaimValue(group.getLocation());
+                    break;
+                case CREATED_CLAIM_URI:
+                    claim.setClaimValue(group.getCreatedDate());
+                    break;
+                case MODIFIED_CLAIM_URI:
+                    claim.setClaimValue(group.getLastModifiedDate());
+                    break;
+                default:
+                    if (CollectionUtils.isEmpty(groupClaims)) {
+                        break;
+                    }
+                    for (org.wso2.carbon.user.core.common.Claim groupClaim : groupClaims) {
+                        if (StringUtils.equals(groupClaim.getClaimUrl(), claimUrl)) {
+                            claim.setClaimValue(groupClaim.getClaimValue());
+                            break;
+                        }
+                    }
+                    break;
+            }
+        }
     }
 
     @Override
@@ -16871,11 +18184,114 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     public void updateUserListOfGroup(String groupID, List<String> deletedUserIds, List<String> newUserIds)
             throws UserStoreException {
 
-        if (log.isDebugEnabled()) {
-            log.debug("updateUserListOfGroup operation is not implemented in: " + this.getClass());
+        String groupName = getGroupNameByGroupId(groupID);
+        if (StringUtils.isBlank(groupName)) {
+            throw new UserStoreClientException(String.format(ERROR_NO_GROUP_FOUND_WITH_ID.getMessage(), groupID,
+                    tenantId), ERROR_NO_GROUP_FOUND_WITH_ID.getCode());
         }
-        throw new NotImplementedException(
-                "updateUserListOfGroup operation is not implemented in: " + this.getClass());
+        UserStore userStore = getUserStoreInternalWithGroupId(groupID);
+        if (userStore.isRecurssive()) {
+            ((AbstractUserStoreManager) userStore.getUserStoreManager())
+                    .updateUserListOfGroup(groupID, UserCoreUtil.removeDomainFromNames(deletedUserIds),
+                            UserCoreUtil.removeDomainFromNames(newUserIds));
+            return;
+        }
+        if (isReadOnly()) {
+            String errorCode = ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getCode();
+            String errorMessage = ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getMessage();
+            handleUpdateUserListOfGroupFailure(errorCode, errorMessage, groupID, deletedUserIds, newUserIds);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        if (!writeGroupsEnabled) {
+            String errorCode = ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getCode();
+            String errorMessage = ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getMessage();
+            handleUpdateUserListOfGroupFailure(errorCode, errorMessage, groupID, deletedUserIds, newUserIds);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        try {
+            AccessController.doPrivileged((PrivilegedExceptionAction<String>) () -> {
+                // If group Id feature is not enabled, we need to call the legacy method.
+                if (isUniqueGroupIdEnabled()) {
+                    updateUserListOfGroupByGroupId(groupID, UserCoreUtil.removeDomainFromName(groupName),
+                            deletedUserIds, newUserIds);
+                } else {
+                    // Need to attach the user store domain name to the group name.
+                    updateUserListOfRoleWithID(UserCoreUtil.addDomainToName(groupName, getMyDomainName()),
+                            deletedUserIds.toArray(new String[0]), newUserIds.toArray(new String[0]));
+                }
+                return null;
+            });
+        } catch (PrivilegedActionException e) {
+            if (!(e.getException() instanceof UserStoreException)) {
+                handleUpdateUserListOfGroupFailure(
+                        ErrorMessages.ERROR_WHILE_UPDATE_USER_LIST_OF_GROUP.getCode(),
+                        String.format(ErrorMessages.ERROR_WHILE_UPDATE_USER_LIST_OF_GROUP.getMessage(),
+                                e.getMessage()), groupID, deletedUserIds, newUserIds);
+            }
+            throw (UserStoreException) e.getException();
+        }
+    }
+
+    /**
+     * Update user list of group by group id in group uuid enabled userstores.
+     *
+     * @param groupId        Group id.
+     * @param groupName      Group name.
+     * @param deletedUserIds Deleted user ids.
+     * @param newUserIds     New user ids.
+     * @throws UserStoreException If an error occurs while updating user list of group.
+     */
+    private void updateUserListOfGroupByGroupId(String groupId, String groupName, List<String> deletedUserIds,
+                                                List<String> newUserIds) throws UserStoreException {
+
+        // ################################### Domain Name Free Zone Starts Here ####################################
+        if (CollectionUtils.isEmpty(deletedUserIds)) {
+            deletedUserIds = Collections.emptyList();
+        }
+        if (CollectionUtils.isEmpty(newUserIds)) {
+            newUserIds = Collections.emptyList();
+        }
+        // ########################################## </Pre-Listeners> ##############################################
+        if (!handlePreUpdateUserListOfGroup(groupName, deletedUserIds, newUserIds)) {
+            handleUpdateUserListOfGroupFailure(
+                    ErrorMessages.ERROR_WHILE_UPDATE_USER_LIST_OF_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_WHILE_UPDATE_USER_LIST_OF_GROUP.getMessage(),
+                            UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), groupName, deletedUserIds,
+                    newUserIds);
+            return;
+        }
+
+        // Backward compatible listeners.
+        if (!handlePreUpdateUserListOfRoleWithID(groupName, deletedUserIds.toArray(new String[0]),
+                newUserIds.toArray(new String[0]), false, false)) {
+            handleUpdateUserListOfRoleFailureWithID(
+                    ErrorMessages.ERROR_CODE_ERROR_WHILE_PRE_UPDATE_USERS_OF_ROLE.getCode(),
+                    String.format(ErrorMessages.ERROR_CODE_ERROR_WHILE_PRE_UPDATE_USERS_OF_ROLE.getMessage(),
+                            UserCoreErrorConstants.PRE_LISTENER_TASKS_FAILED_MESSAGE), groupName,
+                    deletedUserIds.toArray(new String[0]), newUserIds.toArray(new String[0]));
+            return;
+        }
+        // ########################################## </Pre-Listeners> ##############################################
+        try {
+            doUpdateUserListOfGroup(groupId, deletedUserIds, newUserIds);
+        } catch (UserStoreException ex) {
+            handleUpdateUserListOfGroupFailure(
+                    ErrorMessages.ERROR_WHILE_UPDATE_USER_LIST_OF_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_WHILE_UPDATE_USER_LIST_OF_GROUP.getMessage(), ex.getMessage()),
+                    groupId, deletedUserIds, newUserIds);
+            throw ex;
+        }
+        // Need to clear user roles cache upon roles update. Here role cache needs to be cleared to maintain backward
+        // compatibility.
+        clearUserRolesCacheByTenant(this.tenantId);
+        // ########################################## </Post-Listeners> ##############################################
+        handlePostUpdateUserListOfGroup(groupId, deletedUserIds, newUserIds);
+
+        // Backward compatible listeners after updating user list of role.
+        handleDoPostUpdateUserListOfRoleWithID(groupName, deletedUserIds.toArray(new String[0]),
+                newUserIds.toArray(new String[0]), false, false);
+
+        // ########################################## </Post-Listeners> ##############################################
     }
 
     @Override
@@ -16938,27 +18354,189 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
             Object object = callSecure("isGroupExist", new Object[]{groupID}, argTypes);
             return (boolean) object;
         }
-        return StringUtils.isNotBlank(getGroupNameByGroupId(groupID));
+
+        if (StringUtils.isBlank(groupID)) {
+            throw new UserStoreClientException(ERROR_EMPTY_GROUP_ID.getMessage(), ERROR_EMPTY_GROUP_ID.getCode());
+        }
+        UserStore userStore = getUserStoreWithGroupId(groupID);
+        if (userStore.isRecurssive()) {
+            return ((AbstractUserStoreManager) userStore.getUserStoreManager()).isGroupExist(groupID);
+        }
+
+        // #################### Domain Name Free Zone Starts Here ################################
+        return StringUtils.isNotBlank(getGroupNameById(groupID));
+    }
+
+    @Override
+    public boolean isGroupExistWithName(String groupName) throws UserStoreException {
+
+        if (!isSecureCall.get()) {
+            Class[] argTypes = new Class[]{String.class};
+            Object object = callSecure("isGroupExistWithName", new Object[]{groupName}, argTypes);
+            return (boolean) object;
+        }
+        if (StringUtils.isBlank(groupName)) {
+            throw new UserStoreClientException(ERROR_EMPTY_GROUP_NAME.getMessage(), ERROR_EMPTY_GROUP_NAME.getCode());
+        }
+        UserStore userStore = getUserStoreWithGroupName(groupName);
+        if (userStore.isRecurssive()) {
+            return ((AbstractUserStoreManager) userStore.getUserStoreManager()).isGroupExistWithName(
+                    UserCoreUtil.removeDomainFromName(groupName));
+        }
+        // #################### Domain Name Free Zone Starts Here ################################
+        return StringUtils.isNotBlank(getGroupIdByGroupName(groupName));
     }
 
     @Override
     public void deleteGroup(String groupID) throws UserStoreException {
 
-        if (log.isDebugEnabled()) {
-            log.debug("deleteGroup operation is not implemented in: " + this.getClass());
+        if (!isSecureCall.get()) {
+            Class argTypes[] = new Class[]{String.class};
+            callSecure("deleteGroup", new Object[]{groupID}, argTypes);
+            return;
         }
-        throw new NotImplementedException(
-                "deleteGroup operation is not implemented in: " + this.getClass());
+        UserStore userStore = getUserStoreWithGroupId(groupID);
+        if (userStore.isRecurssive()) {
+            ((AbstractUserStoreManager) userStore.getUserStoreManager()).deleteGroup(userStore.getDomainFreeGroupId());
+            return;
+        }
+
+        String groupName = getGroupNameByGroupId(groupID);
+        String domain = UserCoreUtil.extractDomainFromName(groupName);
+        // ############################# Domain Name Free Zone Starts Here ################################
+        groupName = UserCoreUtil.removeDomainFromName(groupName);
+        if (StringUtils.isBlank(groupName)) {
+            throw new UserStoreClientException(String.format(ERROR_NO_GROUP_FOUND_WITH_ID.getMessage(), groupID,
+                    tenantId), ERROR_NO_GROUP_FOUND_WITH_ID.getCode());
+        }
+        if (isReadOnly()) {
+            handleDeleteGroupFailure(ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getCode(),
+                    ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getMessage(), groupID);
+            throw new UserStoreException(ErrorMessages.ERROR_CODE_READONLY_USER_STORE.toString());
+        }
+        if (!writeGroupsEnabled) {
+            handleDeleteRoleFailure(ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getCode(),
+                    ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getMessage(), groupID);
+            throw new UserStoreException(ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.toString());
+        }
+        // #################### <Pre-Listeners> #####################################################
+        if (!handlePreDeleteGroup(groupName)) {
+            return;
+        }
+        // Invoke legacy listeners to maintain backward compatibility.
+        if (!handleDoPreDeleteRole(groupName, false)) {
+            return;
+        }
+        // #################### </Pre-Listeners> #####################################################
+        // Clear cache and mapper tables.
+        groupUniqueIDDomainResolver.removeDomainForGroupId(groupID, domain, tenantId, false);
+        try {
+            if (isUniqueGroupIdEnabled()) {
+                doDeleteGroupByGroupId(groupID);
+            } else {
+                doDeleteGroupByGroupName(groupName);
+            }
+        } catch (UserStoreException e) {
+            // Add the deleted mapping back to the cache and the DB.
+            groupUniqueIDDomainResolver.setDomainForGroupId(groupID, domain, tenantId, false);
+            handleDeleteGroupFailure(ErrorMessages.ERROR_WHILE_DELETE_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_WHILE_DELETE_GROUP.getMessage(), e.getMessage()), groupID);
+            throw e;
+        }
+        // #################### <Post-Listeners> #####################################################
+        handlePostDeleteGroup(groupID, groupName);
+        // Invoke legacy listeners to maintain backward compatibility.
+        handleDoPostDeleteRole(groupName, false);
+        // #################### </Post-Listeners> #####################################################
+
+        // Clear the userRole cache.
+        clearUserRolesCacheByTenant(tenantId);
     }
 
     @Override
     public Group renameGroup(String groupID, String newGroupName) throws UserStoreException {
 
-        if (log.isDebugEnabled()) {
-            log.debug("renameGroup operation is not implemented in: " + this.getClass());
+        if (!isSecureCall.get()) {
+            Class argTypes[] = new Class[]{String.class, String.class};
+            Object object = callSecure("renameGroup", new Object[]{groupID, newGroupName}, argTypes);
+            return (Group) object;
         }
-        throw new NotImplementedException(
-                "renameGroup operation is not implemented in: " + this.getClass());
+        UserStore userStore = getUserStoreWithGroupId(groupID);
+        UserStore newUserStore = getUserStoreWithGroupName(newGroupName);
+        if (userStore.isRecurssive()) {
+            return ((AbstractUserStoreManager) userStore.getUserStoreManager())
+                    .renameGroup(userStore.getDomainFreeGroupId(), UserCoreUtil.removeDomainFromName(newGroupName));
+        }
+        // #################### Domain Name Free Zone Starts Here ################################
+        // For non recursive user stores, we need to check the domain of the new group name.
+        newGroupName = UserCoreUtil.removeDomainFromName(newGroupName);
+        if (!isGroupNameValid(newGroupName)) {
+            String regEx = realmConfig
+                    .getUserStoreProperty(UserCoreConstants.RealmConfig.PROPERTY_ROLE_NAME_JAVA_REG_EX);
+            String errorMessage = String
+                    .format(ErrorMessages.ERROR_CODE_INVALID_GROUP_NAME.getMessage(), newGroupName, regEx);
+            String errorCode = ErrorMessages.ERROR_CODE_INVALID_GROUP_NAME.getCode();
+            handleRenameGroupFailure(errorCode, errorMessage, groupID, newGroupName);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        String currentGroupName = UserCoreUtil.removeDomainFromName(getGroupNameByGroupId(groupID));
+        // When the existing group name is same as the new group name, we do not fail the operation.
+        if (!StringUtils.equalsIgnoreCase(currentGroupName, newGroupName) &&
+                doCheckExistingGroupName(newGroupName)) {
+            String errorCode = ErrorMessages.ERROR_CODE_GROUP_ALREADY_EXISTS.getCode();
+            String errorMessage =
+                    String.format(ErrorMessages.ERROR_CODE_GROUP_ALREADY_EXISTS.getMessage(), newGroupName);
+            handleRenameGroupFailure(errorCode, errorMessage, groupID, newGroupName);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        if (isReadOnly()) {
+            String errorCode = ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getCode();
+            String errorMessage = ErrorMessages.ERROR_CODE_READONLY_USER_STORE.getMessage();
+            handleRenameGroupFailure(errorCode, errorMessage, groupID, newGroupName);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        if (!writeGroupsEnabled) {
+            String errorCode = ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getCode();
+            String errorMessage = ErrorMessages.ERROR_CODE_WRITE_GROUPS_NOT_ENABLED.getMessage();
+            handleRenameGroupFailure(errorCode, errorMessage, groupID, newGroupName);
+            throw new UserStoreClientException(errorMessage, errorCode);
+        }
+        // ############################### <Pre-Listeners> ##########################################
+
+        if (!handlePreRenameGroup(groupID, newGroupName)) {
+            return null;
+        }
+        // Invoking legacy listeners.
+        if (!handlePreUpdateRoleName(currentGroupName, newGroupName, false)) {
+            return null;
+        }
+
+        // ############################### </Pre-Listeners> ##########################################
+        clearGroupIDResolverCache(groupID, tenantId);
+        try {
+            if (isUniqueGroupIdEnabled()) {
+                doUpdateGroupNameByGroupId(groupID, newGroupName);
+            } else {
+                // Current group name does not have the domain here.
+                doUpdateGroupName(currentGroupName, UserCoreUtil.removeDomainFromName(newGroupName));
+            }
+        } catch (UserStoreException e) {
+            // Add the deleted mapping back to the cache and the DB.
+            addGroupNameToGroupIdCache(groupID, UserCoreUtil.removeDomainFromName(currentGroupName), getMyDomainName());
+            handleRenameGroupFailure(ErrorMessages.ERROR_WHILE_RENAME_GROUP.getCode(),
+                    String.format(ErrorMessages.ERROR_WHILE_RENAME_GROUP.getMessage(), e.getMessage()), groupID,
+                    newGroupName);
+            throw e;
+        }
+        addGroupNameToGroupIdCache(groupID, UserCoreUtil.removeDomainFromName(newGroupName), this.getMyDomainName());
+        // ############################### <Post-Listeners> ##########################################
+
+        handlePostRenameGroup(groupID, newGroupName);
+        // Invoking legacy listeners.
+        handlePostUpdateRoleName(currentGroupName, newGroupName, false);
+
+        // ############################### </Post-Listeners> ##########################################
+        return new Group(groupID, newUserStore.getDomainAwareGroupName());
     }
 
     @Override
@@ -17103,10 +18681,10 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
 
         // #################### Invoke userstore methods ####################
         Group group = new Group(null, groupName);
+        group.setUserStoreDomain(getMyDomainName());
         if (isUniqueGroupIdEnabled(this)) {
             String groupId = this.doGetGroupIdFromGroupName(groupName);
             group.setGroupID(groupId);
-            group.setUserStoreDomain(getMyDomainName());
         } else {
             // Invoking group resolver to get data from the legacy approach.
             GroupResolver groupResolver = UserStoreMgtDataHolder.getInstance().getGroupResolver();
@@ -18154,5 +19732,101 @@ public abstract class AbstractUserStoreManager implements PaginatedUserStoreMana
     public void removeGroupRoleMappingByGroupName(String groupName) throws UserStoreException {
 
         hybridRoleManager.removeGroupRoleMappingByGroupName(groupName);
+    }
+
+    /**
+     * The password validity timeout value is set by server configuration value from carbon.xml file.
+     * If value is not present the default value of DEFAULT_PASSWORD_VALIDITY_PERIOD_VALUE is returned.
+     * @return password validity timeout in hours.
+     */
+    private static int getDefaultPasswordValidityPeriodInHours() {
+
+        String pwValidityTimeoutStr = ServerConfiguration.getInstance()
+                .getFirstProperty(ServerConstants.DEFAULT_PASSWORD_VALIDITY_PERIOD);
+        if (!StringUtils.isBlank(pwValidityTimeoutStr)) {
+            return Integer.parseInt(pwValidityTimeoutStr);
+        }
+        return DEFAULT_PASSWORD_VALIDITY_PERIOD_VALUE;
+    }
+
+    /**
+     * Getter for the user store manager holder.
+     *
+     * @return Map of user store managers.
+     */
+    public Map<String, UserStoreManager> getUserStoreManagerHolder() {
+
+        return userStoreManagerHolder;
+    }
+
+    /**
+     * Getter for the user unique ID domain resolver.
+     *
+     * @return UserUniqueIDDomainResolver.
+     */
+    public UserUniqueIDDomainResolver getUserUniqueIDDomainResolver() {
+
+        return userUniqueIDDomainResolver;
+    }
+
+    /**
+     * Retrieves the user count that belongs to a given group.
+     *
+     * @param groupName Name of the group.
+     * @return User count of the given group.
+     * @throws UserStoreException If an unexpected error occurs while accessing user store.
+     */
+    public int getUserCountForGroup(String groupName) throws UserStoreException {
+
+        int count = 0;
+        if (!isSecureCall.get()) {
+            Class argTypes[] = new Class[]{String.class};
+            Object object = callSecure("getUserCountForGroup", new Object[]{groupName}, argTypes);
+            return (int) object;
+        }
+
+        // If group does not exit, just return.
+        if (!isExistingRole(groupName)) {
+            return count;
+        }
+
+        UserStore userStore = getUserStoreOfRoles(groupName);
+
+        if (userStore.isRecurssive()) {
+            UserStoreManager resolvedUserStoreManager = userStore.getUserStoreManager();
+            if (resolvedUserStoreManager instanceof AbstractUserStoreManager) {
+                return ((AbstractUserStoreManager) resolvedUserStoreManager)
+                        .getUserCountForGroup(userStore.getDomainFreeName());
+            }
+        }
+
+        // #################### Domain Name Free Zone Starts Here ################################
+
+        if (userStore.isSystemStore() || userStore.isHybridRole()) {
+            // If the passed group is a role and if role, group separation is not enabled,
+            // call the user listing method for roles.
+            if (!isRoleAndGroupSeparationEnabled()) {
+                return getUserListOfRoleWithID(groupName).size();
+            }
+            // If the passed group is a role and if role, group separation is enabled, just return.
+            return count;
+        }
+
+        if (readGroupsEnabled) {
+            // If unique id feature is not enabled, we have to call the legacy methods.
+            if (!isUniqueUserIdEnabledInUserStore(userStore)) {
+                count += doGetUserCountOfRole(groupName);
+            } else {
+                count += doGetUserCountOfRoleWithID(groupName);
+            }
+        }
+
+        return count;
+    }
+
+    // Default assigned as false.
+    protected boolean isCircuitBreakerEnabledAndOpen() throws UserStoreException {
+
+        return false;
     }
 }

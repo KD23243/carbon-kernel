@@ -39,6 +39,11 @@ import javax.servlet.http.HttpServletResponse;
  *
  * @since 4.2.0
  */
+
+/**
+ * @deprecated This class is moved to org.wso2.carbon.tomcat.ext
+ */
+@Deprecated
 public class URLBasedCachePreventionFilter extends AbstractCachePreventionFilter {
 
     /**

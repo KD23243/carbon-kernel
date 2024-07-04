@@ -18,11 +18,16 @@
 
 package org.wso2.carbon.user.core.common;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.wso2.carbon.context.PrivilegedCarbonContext;
+import org.wso2.carbon.user.api.UserStoreManager;
+import org.wso2.carbon.user.core.UserCoreConstants;
+import org.wso2.carbon.user.core.UserStoreClientException;
 import org.wso2.carbon.user.core.UserStoreException;
-import org.wso2.carbon.utils.xml.StringUtils;
+import org.wso2.carbon.user.core.service.RealmService;
+import org.wso2.carbon.user.core.util.UserCoreUtil;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -32,6 +37,8 @@ import javax.cache.Cache;
 import javax.cache.CacheManager;
 import javax.cache.Caching;
 import javax.sql.DataSource;
+
+import static org.wso2.carbon.user.core.UserStoreConfigConstants.RESOLVE_GROUP_NAME_FROM_USER_ID_CACHE_NAME;
 
 /**
  * Purpose of this class is to keep a mapping between group unique id and the domain of that group to reduce the
@@ -60,6 +67,9 @@ public class GroupUniqueIDDomainResolver {
             "UM_TENANT_ID = ?), ?)";
     private static final String GET_DOMAIN = "SELECT UM_DOMAIN_NAME FROM UM_DOMAIN WHERE UM_DOMAIN_ID=(SELECT " +
             "UM_DOMAIN_ID FROM UM_GROUP_UUID_DOMAIN_MAPPER WHERE UM_GROUP_ID = ? AND UM_TENANT_ID = ?)";
+    private static final String DELETE_DOMAIN =
+            "DELETE FROM UM_GROUP_UUID_DOMAIN_MAPPER " +
+                    "WHERE UM_DOMAIN_ID = (SELECT UM_DOMAIN_ID FROM UM_DOMAIN WHERE UM_DOMAIN_NAME = ? AND UM_TENANT_ID = ?) AND UM_GROUP_ID = ? AND UM_TENANT_ID = ?";
 
     public GroupUniqueIDDomainResolver(DataSource dataSource) {
 
@@ -91,26 +101,42 @@ public class GroupUniqueIDDomainResolver {
 
             // Read the cache first.
             String domainName = uniqueIdDomainCache.get(groupId);
-            if (domainName != null) {
+
+            if (StringUtils.isBlank(domainName)) {
+                // Domain name is not in the cache.
                 if (log.isDebugEnabled()) {
-                    log.debug("Cache hit for group id: " + groupId);
+                    log.debug("Cache miss for group id: " + groupId + " searching from the database");
                 }
-                return domainName;
+                // Read the domain name from the Database;
+                domainName = getDomainFromDB(groupId, tenantId);
+                // Update the cache.
+                if (StringUtils.isNotBlank(domainName)) {
+                    uniqueIdDomainCache.put(groupId, domainName);
+                    if (log.isDebugEnabled()) {
+                        log.debug("Domain with name: " + domainName + " retrieved from the database.");
+                    }
+                }
             }
-            // Domain name is not in the cache.
-            if (log.isDebugEnabled()) {
-                log.debug("Cache miss for group id: " + groupId + " searching from the database");
-            }
-            // Read the domain name from the Database;
-            domainName = getDomainFromDB(groupId, tenantId);
-            // Update the cache.
-            if (domainName != null) {
-                uniqueIdDomainCache.put(groupId, domainName);
-                if (log.isDebugEnabled()) {
-                    log.debug("Domain with name: " + domainName + " retrieved from the database.");
+            if (StringUtils.isNotBlank(domainName) &&
+                    !UserCoreConstants.PRIMARY_DEFAULT_DOMAIN_NAME.equals(domainName)) {
+                RealmService realmService = UserCoreUtil.getRealmService();
+                UserStoreManager userStoreManager = null;
+                if (realmService != null) {
+                    userStoreManager = ((AbstractUserStoreManager) realmService.getTenantUserRealm(tenantId)
+                            .getUserStoreManager()).getSecondaryUserStoreManager(domainName);
+                }
+                if (userStoreManager == null) {
+                    if (log.isDebugEnabled()) {
+                        log.debug("Entry is outdated. Clearing cache and the database entries.");
+                    }
+                    clearGroupIDResolverCache(groupId, tenantId);
+                    deleteDomainFromDB(domainName, groupId, tenantId);
+                    domainName = null;
                 }
             }
             return domainName;
+        } catch (org.wso2.carbon.user.api.UserStoreException e) {
+            throw new UserStoreException("Tenant user realm  cannot be resolved for tenantId: " + tenantId, e);
         } finally {
             PrivilegedCarbonContext.endTenantFlow();
         }
@@ -126,7 +152,8 @@ public class GroupUniqueIDDomainResolver {
      *                           the userstore manager does not support group uuid.
      * @throws UserStoreException If an error occurred while setting the domain name for the group id.
      */
-    public void setDomainForGroupId(String groupId, String userstoreDomain, int tenantId, boolean persistToCacheOnly) throws UserStoreException {
+    public void setDomainForGroupId(String groupId, String userstoreDomain, int tenantId, boolean persistToCacheOnly)
+            throws UserStoreException {
 
         try {
             if (StringUtils.isEmpty(groupId) || StringUtils.isEmpty(userstoreDomain)) {
@@ -151,6 +178,59 @@ public class GroupUniqueIDDomainResolver {
             if (log.isDebugEnabled()) {
                 log.debug(String.format("Successfully persisted group id: %s against domain: %s and added to " +
                         "the cache", groupId, userstoreDomain));
+            }
+        } finally {
+            PrivilegedCarbonContext.endTenantFlow();
+        }
+    }
+
+    /**
+     * Remove the domain to group mappings for the given group id given tenant.
+     *
+     * @param groupId         Group unique id.
+     * @param userstoreDomain Userstore domain name.
+     * @param tenantId        Tenant id.
+     * @param clearOnlyCache  Whether to clear the cache only. This needs to be set to true if the userstore manager
+     *                        does not support group uuid
+     * @throws UserStoreException If an error occurred while removing the domain name for the group id.
+     */
+    public void removeDomainForGroupId(String groupId, String userstoreDomain, int tenantId, boolean clearOnlyCache)
+            throws UserStoreException {
+
+        try {
+            if (StringUtils.isEmpty(groupId)) {
+                throw new UserStoreException("group id cannot be empty or null");
+            }
+            PrivilegedCarbonContext.startTenantFlow();
+            PrivilegedCarbonContext carbonContext = PrivilegedCarbonContext.getThreadLocalCarbonContext();
+            carbonContext.setTenantId(tenantId, true);
+            CacheManager cacheManager = Caching.getCacheManagerFactory()
+                    .getCacheManager(GROUP_UNIQUE_ID_DOMAIN_RESOLVER_CACHE_MANGER_NAME);
+            Cache<String, String> uniqueIdDomainCache =
+                    cacheManager.getCache(GROUP_UNIQUE_ID_DOMAIN_RESOLVER_CACHE_NAME);
+            uniqueIdDomainCache.remove(groupId);
+            clearGroupIDResolverCache(groupId, tenantId);
+            if (log.isDebugEnabled()) {
+                log.debug(String.format("Successfully removed group id: %s from the cache", groupId));
+            }
+            if (!clearOnlyCache) {
+                String domainInDb = getDomainFromDB(groupId, tenantId);
+                if (StringUtils.isBlank(domainInDb)) {
+                    if (log.isDebugEnabled()) {
+                        log.debug(String.format("No domain name found for the give group id: %s", groupId));
+                    }
+                    return;
+                }
+                if (!domainInDb.equals(userstoreDomain)) {
+                    throw new UserStoreClientException(
+                            String.format("Provided domain for group id: %s name: %s does not match " +
+                                            "with the domain name in the database: %s in tenant: %s", groupId, userstoreDomain,
+                                    domainInDb, tenantId));
+                }
+                deleteDomainFromDB(userstoreDomain, groupId, tenantId);
+                if (log.isDebugEnabled()) {
+                    log.debug(String.format("Successfully removed group id: %s from the database", groupId));
+                }
             }
         } finally {
             PrivilegedCarbonContext.endTenantFlow();
@@ -271,6 +351,28 @@ public class GroupUniqueIDDomainResolver {
             }
         } catch (SQLException e) {
             log.error("An error occurred while transaction rollback", e);
+        }
+    }
+
+    private void clearGroupIDResolverCache(String groupId, int tenantId) {
+
+        GroupIdResolverCache.getInstance()
+                .clearCacheEntry(groupId, RESOLVE_GROUP_NAME_FROM_USER_ID_CACHE_NAME, tenantId);
+
+    }
+
+    private void deleteDomainFromDB(String userDomain, String groupId, int tenantId) throws UserStoreException {
+
+        try (Connection dbConnection = getDBConnection();
+             PreparedStatement preparedStatement = dbConnection.prepareStatement(DELETE_DOMAIN)) {
+            preparedStatement.setString(1, userDomain);
+            preparedStatement.setInt(2, tenantId);
+            preparedStatement.setString(3, groupId);
+            preparedStatement.setInt(4, tenantId);
+            preparedStatement.execute();
+            commitTransaction(dbConnection);
+        } catch (SQLException ex) {
+            throw new UserStoreException("Error occurred while deleting the domain name for group id from database.", ex);
         }
     }
 }
