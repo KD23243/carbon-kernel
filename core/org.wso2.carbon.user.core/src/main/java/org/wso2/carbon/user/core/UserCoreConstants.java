@@ -121,6 +121,11 @@ public class UserCoreConstants {
     public static final String USER_LOCKED = "true";
     public static final String USER_UNLOCKED = "false";
 
+    // Properties used for cursor pagination direction
+    public enum PaginationDirection {
+        PREVIOUS, NEXT
+    }
+
     // Server level config introduced for backward compatibility with the CircuitBreaker.
     public static final String PROP_ENABLE_CIRCUIT_BREAKER_FOR_USERSTORE =
             "UserStore.enableCircuitBreakerForUserStores";
